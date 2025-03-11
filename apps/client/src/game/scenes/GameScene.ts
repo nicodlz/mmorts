@@ -1971,7 +1971,8 @@ export class GameScene extends Phaser.Scene {
       resourceId: string,
       amount: number,
       playerId: string,
-      resourceType: string
+      resourceType: string,
+      playerResources?: {[key: string]: number}
     }) => {
       const resourceSprite = this.resourceSprites.get(data.resourceId);
       if (resourceSprite) {
@@ -1979,6 +1980,20 @@ export class GameScene extends Phaser.Scene {
         
         // Si c'est nous qui avons récolté, mettre à jour l'UI
         if (data.playerId === this.room.sessionId) {
+          // Mise à jour directe des ressources du joueur si reçues du serveur
+          if (data.playerResources && this.playerEntity) {
+            // Mettre à jour la ressource spécifique
+            Object.entries(data.playerResources).forEach(([type, amount]) => {
+              // Utiliser la méthode set du MapSchema existant
+              if (this.playerEntity.resources) {
+                this.playerEntity.resources.set(type, amount);
+              }
+            });
+            
+            console.log('Ressources du joueur mises à jour depuis le serveur:', data.playerResources);
+          }
+          
+          // Mettre à jour l'UI avec les ressources actuelles
           this.updateResourcesUI();
         }
       }

@@ -388,12 +388,28 @@ export class GameRoom extends Room<GameState> {
     // Réduire la quantité de ressource disponible
     resource.amount -= 1;
     
+    // Ajouter la ressource à l'inventaire du joueur
+    // Initialiser les ressources du joueur si nécessaire
+    if (!player.resources) {
+      player.resources = new MapSchema<number>();
+    }
+    
+    // Ajouter la ressource au joueur
+    const currentAmount = player.resources.get(resource.type) || 0;
+    player.resources.set(resource.type, currentAmount + 1);
+    
+    console.log(`Joueur ${client.sessionId} a récolté 1 ${resource.type}, total: ${currentAmount + 1}`);
+    
     // Informer le client qui a récolté
     client.send("resourceUpdate", {
       resourceId,
       amount: resource.amount,
       playerId: client.sessionId,
-      resourceType: resource.type
+      resourceType: resource.type,
+      // Ajouter les ressources du joueur à la réponse
+      playerResources: {
+        [resource.type]: currentAmount + 1
+      }
     });
     
     // Si la ressource est épuisée, planifier sa réapparition
