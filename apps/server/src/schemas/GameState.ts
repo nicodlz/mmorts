@@ -53,6 +53,10 @@ export class ResourceSchema extends Schema {
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") amount: number = 100;
+  @type("number") maxAmount: number = 100;
+  @type("number") respawnTime: number = 60000; // Temps de réapparition en ms
+  @type("number") lastHarvestTime: number = 0; // Dernier temps de récolte
+  @type("boolean") isRespawning: boolean = false;
 }
 
 // Schéma principal du jeu

@@ -8,7 +8,7 @@ import {
   TILE_SIZE,
   CHUNK_SIZE,
   ResourceType,
-  GameState 
+  GameState as GameStateSchema
 } from "../schemas/GameState";
 
 // Schéma principal du jeu
@@ -29,10 +29,33 @@ class GameState extends Schema {
 export class GameRoom extends Room<GameState> {
   private readonly SIMULATION_INTERVAL = 1000 / 30; // 30 fois par seconde
   private intervalId: NodeJS.Timeout | null = null;
+  private mapLines: string[] = [];
+
+  // Constantes pour les quantités de ressources par type
+  private readonly RESOURCE_AMOUNTS: {[key: string]: number} = {
+    [ResourceType.GOLD]: 100,
+    [ResourceType.WOOD]: 20,
+    [ResourceType.STONE]: 75,
+    [ResourceType.IRON]: 60,
+    [ResourceType.COAL]: 40,
+    [ResourceType.STEEL]: 30
+  };
+
+  private readonly RESOURCE_RESPAWN_TIMES: {[key: string]: number} = {
+    [ResourceType.GOLD]: 999999999,   // Désactivé temporairement
+    [ResourceType.WOOD]: 999999999,   // Désactivé temporairement
+    [ResourceType.STONE]: 999999999,  // Désactivé temporairement
+    [ResourceType.IRON]: 999999999,   // Désactivé temporairement
+    [ResourceType.COAL]: 999999999,   // Désactivé temporairement
+    [ResourceType.STEEL]: 999999999   // Désactivé temporairement
+  };
 
   onCreate() {
     // Initialiser l'état du jeu
     this.setState(new GameState());
+
+    // Charger la carte
+    this.loadMap();
 
     // Configurer les gestionnaires de messages
     this.onMessage("move", (client, data) => {
@@ -151,47 +174,62 @@ export class GameRoom extends Room<GameState> {
 
   // Génération du monde initial
   private generateWorld() {
+    console.log("Génération du monde...");
+
     // Générer les ressources
     this.generateResources();
   }
 
-  // Génération des ressources
+  // Méthode pour créer les ressources
   private generateResources() {
-    // Générer l'or, le bois et la pierre ici
-    // Exemple simple: générer quelques ressources
-    for (let i = 0; i < 10; i++) {
-      // Or
-      const gold = new ResourceSchema();
-      gold.id = `gold_${i}`;
-      gold.type = ResourceType.GOLD;
-      gold.x = Math.floor(Math.random() * 2000);
-      gold.y = Math.floor(Math.random() * 2000);
-      this.state.resources.set(gold.id, gold);
-      
-      // Bois
-      const wood = new ResourceSchema();
-      wood.id = `wood_${i}`;
-      wood.type = ResourceType.WOOD;
-      wood.x = Math.floor(Math.random() * 2000);
-      wood.y = Math.floor(Math.random() * 2000);
-      this.state.resources.set(wood.id, wood);
-      
-      // Pierre
-      const stone = new ResourceSchema();
-      stone.id = `stone_${i}`;
-      stone.type = ResourceType.STONE;
-      stone.x = Math.floor(Math.random() * 2000);
-      stone.y = Math.floor(Math.random() * 2000);
-      this.state.resources.set(stone.id, stone);
+    console.log("Génération des ressources...");
+    
+    // Générer les ressources selon la carte
+    for (let y = 0; y < this.mapLines.length; y++) {
+      for (let x = 0; x < this.mapLines[y].length; x++) {
+        const char = this.mapLines[y][x];
+        let resourceType = null;
+        
+        switch (char) {
+          case 'G':
+            resourceType = ResourceType.GOLD;
+            break;
+          case 'W':
+          case 'T':
+            resourceType = ResourceType.WOOD;
+            break;
+          case 'S':
+            resourceType = ResourceType.STONE;
+            break;
+          case 'I':
+            resourceType = ResourceType.IRON;
+            break;
+          case 'C':
+            resourceType = ResourceType.COAL;
+            break;
+        }
+        
+        if (resourceType) {
+          const resource = new ResourceSchema();
+          resource.id = `${resourceType}_${x}_${y}`;
+          resource.type = resourceType;
+          resource.x = x * TILE_SIZE + TILE_SIZE/2;
+          resource.y = y * TILE_SIZE + TILE_SIZE/2;
+          resource.amount = this.RESOURCE_AMOUNTS[resourceType];
+          resource.maxAmount = this.RESOURCE_AMOUNTS[resourceType];
+          resource.respawnTime = this.RESOURCE_RESPAWN_TIMES[resourceType];
+          
+          this.state.resources.set(resource.id, resource);
+        }
+      }
     }
   }
 
   // Gestion de la récolte de ressources
   private handleHarvest(client: Client, data: any) {
-    // Récupération du joueur et de la ressource
     const player = this.state.players.get(client.sessionId);
     const resourceId = data.resourceId;
-    const resource = this.state.resources.get(resourceId);
+    const resource = this.state.resources.get(resourceId) as ResourceSchema;
     
     if (!player || !resource) {
       console.log(`Ressource ou joueur non trouvé: ${resourceId}`);
@@ -209,31 +247,74 @@ export class GameRoom extends Room<GameState> {
       console.log(`Joueur trop loin pour récolter: ${distance.toFixed(2)} pixels`);
       return;
     }
+
+    const now = Date.now();
     
-    console.log(`${client.sessionId} récolte ${resourceId} de type ${resource.type}`);
+    // Vérifier si la ressource est en cours de réapparition
+    if (resource.isRespawning) {
+      console.log(`La ressource ${resourceId} est en cours de réapparition`);
+      return;
+    }
     
-    // Quantité à récolter
-    const harvestAmount = 5;
+    // Vérifier s'il reste des ressources à collecter
+    if (resource.amount <= 0) {
+      console.log(`La ressource ${resourceId} est épuisée`);
+      return;
+    }
+
+    // Vérifier le cooldown de récolte (500ms entre chaque récolte)
+    if (now - resource.lastHarvestTime < 500) {
+      return;
+    }
+    
+    // Mettre à jour le temps de dernière récolte
+    resource.lastHarvestTime = now;
+    
+    // Réduire la quantité de ressource disponible
+    resource.amount -= 1;
     
     // Initialiser les ressources du joueur si nécessaire
     if (!player.resources) {
       player.resources = new MapSchema<number>();
     }
     
-    // Ajouter la ressource au joueur selon son type
+    // Ajouter la ressource au joueur
     const currentAmount = player.resources.get(resource.type) || 0;
-    player.resources.set(resource.type, currentAmount + harvestAmount);
+    player.resources.set(resource.type, currentAmount + 1);
     
-    // Réduire la quantité de ressource disponible
-    resource.amount -= harvestAmount;
+    // Broadcast la mise à jour de la ressource à tous les clients
+    this.broadcast("resourceUpdate", {
+      resourceId: resourceId,
+      amount: resource.amount,
+      playerId: client.sessionId,
+      resourceType: resource.type
+    });
     
-    // Supprimer la ressource si elle est épuisée
+    // Si la ressource est épuisée, planifier sa réapparition
     if (resource.amount <= 0) {
-      this.state.resources.delete(resourceId);
-      console.log(`Ressource épuisée: ${resourceId}`);
+      resource.isRespawning = true;
+      
+      // Planifier la réapparition
+      const respawnTime = this.RESOURCE_RESPAWN_TIMES[resource.type] || 60000;
+      setTimeout(() => {
+        if (this.state.resources.has(resourceId)) {
+          resource.amount = this.RESOURCE_AMOUNTS[resource.type] || resource.maxAmount;
+          resource.isRespawning = false;
+          
+          // Broadcast la réapparition
+          this.broadcast("resourceRespawned", {
+            resourceId: resourceId,
+            amount: resource.amount
+          });
+        }
+      }, respawnTime);
+      
+      // Broadcast l'épuisement
+      this.broadcast("resourceDepleted", {
+        resourceId: resourceId,
+        respawnTime: respawnTime
+      });
     }
-    
-    console.log(`Joueur ${client.sessionId} a maintenant ${player.resources.get(resource.type)} ${resource.type}`);
   }
 
   // Gestion de la construction
@@ -250,5 +331,34 @@ export class GameRoom extends Room<GameState> {
   // Mise à jour de la production
   private updateProduction() {
     // Mettre à jour la production ici
+  }
+
+  // Méthode pour charger la carte
+  private loadMap() {
+    const fs = require('fs');
+    const path = require('path');
+    
+    try {
+      // Chemin vers le fichier de carte
+      const mapPath = path.join(__dirname, '..', 'default.map');
+      console.log("Chargement de la carte depuis:", mapPath);
+      
+      // Lire le fichier
+      const mapContent = fs.readFileSync(mapPath, 'utf8');
+      this.mapLines = mapContent.split('\n');
+      
+      console.log(`Carte chargée avec succès: ${this.mapLines.length} lignes`);
+    } catch (error) {
+      console.error("Erreur lors du chargement de la carte:", error);
+      // Créer une petite carte par défaut en cas d'erreur
+      this.mapLines = [
+        "################",
+        "#..............#",
+        "#....G...W....S#",
+        "#..............#",
+        "################"
+      ];
+      console.log("Utilisation de la carte par défaut");
+    }
   }
 } 

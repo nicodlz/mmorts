@@ -85,6 +85,23 @@ export class GameScene extends Phaser.Scene {
     texts: Map<string, Phaser.GameObjects.Text>;
   } = { container: null, texts: new Map() }; // Initialisation avec des valeurs par défaut
   
+  // Propriétés pour la gestion de la collecte
+  private isHarvesting: boolean = false;
+  private harvestTarget: { id: string, type: string } | null = null;
+  private isMiningActive: boolean = false; // Indique si le joueur est en train de miner
+  private numericEffects: Phaser.GameObjects.Group | null = null; // Groupe pour les effets numériques
+  private miningConfig = {
+    cooldown: 500, // Temps en ms entre chaque collecte
+    animationPhases: 3, // Nombre de phases de l'animation
+    phaseSpeed: 150, // Durée de chaque phase en ms
+    lastCollectTime: 0, // Dernier temps de collecte
+    resourceAmounts: { // Quantité de ressources par type
+      'gold': 100,
+      'wood': 20,
+      'stone': 50
+    }
+  };
+  
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
@@ -98,21 +115,11 @@ export class GameScene extends Phaser.Scene {
     // Désactiver l'interpolation sur toutes les textures (utiliser nearest neighbor pour le pixel art)
     this.textures.on('addtexture', (key: string) => {
       console.log(`Configurant texture ${key} en mode NEAREST`);
-      this.textures.get(key).setFilter(Phaser.Textures.NEAREST);
+      this.textures.list[key].setFilter(Phaser.Textures.NEAREST);
     });
     
-    // Afficher un message quand un asset est chargé
-    this.load.on('filecomplete', (key, type, data) => {
-      console.log(`Asset chargé: ${key} (type: ${type})`);
-      // Forcer le mode NEAREST pour chaque texture chargée
-      if (type === 'image' || type === 'spritesheet') {
-        this.textures.get(key).setFilter(Phaser.Textures.NEAREST);
-        console.log(`Mode NEAREST appliqué à ${key}`);
-      }
-    });
-    
-    // Afficher un message en cas d'erreur de chargement
-    this.load.on('loaderror', (file) => {
+    // Gérer les erreurs de chargement
+    this.load.on('loaderror', (file: any) => {
       console.error(`Erreur de chargement: ${file.key} (${file.src})`);
     });
     
@@ -123,8 +130,8 @@ export class GameScene extends Phaser.Scene {
     this.load.image('player', 'sprites/player.png');
     this.load.image('pickaxe', 'sprites/pickaxe.png');
     this.load.image('gold', 'sprites/gold.png');
-    this.load.image('wood', 'sprites/tree.png');
-    this.load.image('stone', 'sprites/stone.png');
+    this.load.image('wood', 'sprites/tree2.png');
+    this.load.image('stone', 'sprites/stone2.png');
     
     // Charger les tuiles de terrain
     this.load.image('grass', 'sprites/grass.png');
@@ -145,7 +152,7 @@ export class GameScene extends Phaser.Scene {
     // La méthode setTexturePriority n'existe pas dans Phaser
     // Utilisons plutôt la configuration globale des textures
     this.textures.on('addtexture', (key: string) => {
-      this.textures.get(key).setFilter(Phaser.Textures.NEAREST);
+      this.textures.list[key].setFilter(Phaser.Textures.NEAREST);
       console.log(`Mode NEAREST appliqué à la texture: ${key}`);
     });
     
@@ -169,6 +176,11 @@ export class GameScene extends Phaser.Scene {
     this.tabKey.on('down', () => {
       this.isToolMode = !this.isToolMode;
       this.updateCursor();
+      
+      // Arrêter le minage si on change de mode
+      if (!this.isToolMode) {
+        this.handlePointerUp();
+      }
     });
     
     // B pour ouvrir le menu de construction
@@ -177,6 +189,10 @@ export class GameScene extends Phaser.Scene {
       // À implémenter: ouvrir le menu de construction
       this.events.emit('toggleBuildMenu');
     });
+    
+    // Ajouter les événements de souris pour la collecte
+    this.input.on('pointerdown', this.handlePointerDown, this);
+    this.input.on('pointerup', this.handlePointerUp, this);
   }
   
   async create() {
@@ -289,14 +305,22 @@ export class GameScene extends Phaser.Scene {
     );
     this.tool.setOrigin(0, 0.5);
     this.tool.setDepth(10);
-    this.tool.setScale(0.8);
-    this.tool.setPipelineData('antialiasTexture', false);
+    
+    // Stocker l'angle d'origine de l'outil pour les animations
+    this.tool.setData('baseRotation', this.tool.rotation);
+    this.tool.setData('animating', false);
+    
+    // Écouter les mises à jour pour animer doucement l'outil
+    this.events.on('update', this.updateToolAnimation, this);
     
     // Charger les tuiles autour du joueur
     this.updateVisibleTiles();
     
     // Se connecter au serveur Colyseus avec les infos du joueur
     await this.connectToServer(playerName, playerHue);
+    
+    // Initialiser les écouteurs d'événements pour les ressources
+    this.initializeResourceListeners();
     
     // Mettre à jour le curseur
     this.updateCursor();
@@ -307,6 +331,9 @@ export class GameScene extends Phaser.Scene {
     
     // Émettre un événement pour initialiser les ressources dans l'UI
     this.updateResourcesUI();
+
+    // Créer un groupe pour les effets numériques
+    this.numericEffects = this.add.group();
   }
   
   update(time: number, delta: number) {
@@ -332,6 +359,14 @@ export class GameScene extends Phaser.Scene {
     
     // Mettre à jour l'outil seulement si nécessaire
     this.updateTool();
+    
+    // Gérer le minage et la collecte
+    if (this.isMiningActive && this.isToolMode) {
+      this.updateMining(time);
+    }
+    
+    // Mettre à jour l'animation de l'outil (AJOUT CRITIQUE)
+    this.updateToolAnimation(time, delta);
     
     // Mettre à jour la position du nom du joueur
     const playerNameText = this.children.list.find(
@@ -400,6 +435,33 @@ export class GameScene extends Phaser.Scene {
         name: message.name,
         hue: message.hue
       }, message.sessionId);
+    });
+    
+    // Écouter les messages d'épuisement de ressources
+    this.room.onMessage("resourceDepleted", (message) => {
+      console.log("Ressource épuisée:", message.resourceId);
+      
+      // Récupérer le sprite de la ressource
+      const resourceSprite = this.resourceSprites.get(message.resourceId);
+      if (resourceSprite) {
+        // Marquer la ressource comme épuisée
+        resourceSprite.setData('amount', 0);
+        
+        // Appliquer un effet visuel pour montrer l'épuisement
+        this.depleteResource(resourceSprite, message.resourceId);
+      }
+    });
+    
+    // Écouter les mises à jour de ressources
+    this.room.onMessage("resourceUpdate", (message) => {
+      console.log("Mise à jour de ressource:", message);
+      
+      // Récupérer le sprite de la ressource
+      const resourceSprite = this.resourceSprites.get(message.resourceId);
+      if (resourceSprite) {
+        // Mettre à jour la quantité
+        resourceSprite.setData('amount', message.amount);
+      }
     });
     
     this.room.onMessage("playerLeft", (message) => {
@@ -601,6 +663,75 @@ export class GameScene extends Phaser.Scene {
       console.log(`Unité supprimée: ${unitId}`);
       // Ajouter le code pour gérer la suppression d'unités ici si nécessaire
     });
+
+    // Écouter les changements sur les ressources
+    this.room.state.resources.onAdd = (resource: any, resourceId: string) => {
+      console.log(`Ressource ajoutée: ${resourceId} (type: ${resource.type}, position: ${resource.x}, ${resource.y})`);
+      
+      // Ne pas créer de sprite si la ressource est épuisée
+      if (resource.amount <= 0 || resource.isRespawning) {
+        console.log(`La ressource ${resourceId} est épuisée ou en respawn, ignorée`);
+        return;
+      }
+      
+      // Vérifier si la ressource n'existe pas déjà
+      const existingSprite = this.resourceSprites.get(resourceId);
+      if (existingSprite) {
+        console.log(`La ressource ${resourceId} existe déjà, mise à jour...`);
+        existingSprite.setPosition(resource.x, resource.y);
+        existingSprite.setData('amount', resource.amount);
+        return;
+      }
+      
+      // Créer le sprite pour la ressource
+      const resourceSprite = this.createResource(resource.type, resource.x, resource.y);
+      
+      // Mettre à jour la quantité avec celle du serveur
+      resourceSprite.setData('amount', resource.amount);
+      
+      // Stocker la référence au sprite
+      this.resourceSprites.set(resourceId, resourceSprite);
+      
+      console.log(`Nombre total de ressources: ${this.resourceSprites.size}`);
+    };
+    
+    // Écouter les modifications des ressources
+    this.room.state.resources.onChange = (resource: any, resourceId: string) => {
+      // Récupérer le sprite correspondant
+      const resourceSprite = this.resourceSprites.get(resourceId);
+      if (!resourceSprite) return;
+      
+      // Si la quantité a changé, mettre à jour la donnée locale
+      if (resource.amount !== undefined) {
+        const oldAmount = resourceSprite.getData('amount') || 0;
+        
+        // Ne pas mettre à jour si c'est nous qui avons fait le changement
+        if (this.harvestTarget && this.harvestTarget.id === resourceId) {
+          return;
+        }
+        
+        // Si la ressource est épuisée ou en respawn, la supprimer
+        if (resource.amount <= 0 || resource.isRespawning) {
+          this.depleteResource(resourceSprite, resourceId);
+          return;
+        }
+        
+        // Mettre à jour la quantité
+        resourceSprite.setData('amount', resource.amount);
+      }
+    };
+    
+    // Écouter les suppressions de ressources
+    this.room.state.resources.onRemove = (resource: any, resourceId: string) => {
+      console.log(`Ressource supprimée: ${resourceId}`);
+      
+      // Récupérer et supprimer le sprite
+      const resourceSprite = this.resourceSprites.get(resourceId);
+      if (resourceSprite) {
+        resourceSprite.destroy();
+        this.resourceSprites.delete(resourceId);
+      }
+    };
   }
   
   // Crée un sprite pour un autre joueur
@@ -1188,23 +1319,18 @@ export class GameScene extends Phaser.Scene {
         // Ajouter des éléments spécifiques sur l'herbe
         switch (tileChar) {
           case '#': // Mur
-            const wall = this.add.image(centerX, centerY, 'wall');
-            wall.setOrigin(0.5).setDepth(5);
+            const wall = this.createTile('wall', centerX, centerY);
+            wall.setDepth(5);
             break;
           case 'W': // Arbre (bois)
-            const wood = this.add.sprite(centerX, centerY, 'wood');
-            wood.setOrigin(0.5).setScale(0.8).setDepth(5);
-            this.resourceSprites.set(`wood_${x}_${y}`, wood);
+          case 'T': // Arbre (alternative)
+            // Supprimer la création des ressources ici car elles sont gérées par le serveur
             break;
           case 'S': // Pierre
-            const stone = this.add.sprite(centerX, centerY, 'stone');
-            stone.setOrigin(0.5).setScale(0.8).setDepth(5);
-            this.resourceSprites.set(`stone_${x}_${y}`, stone);
+            // Supprimer la création des ressources ici car elles sont gérées par le serveur
             break;
           case 'G': // Or
-            const gold = this.add.sprite(centerX, centerY, 'gold');
-            gold.setOrigin(0.5).setScale(0.8).setDepth(5);
-            this.resourceSprites.set(`gold_${x}_${y}`, gold);
+            // Supprimer la création des ressources ici car elles sont gérées par le serveur
             break;
         }
       }
@@ -1349,5 +1475,456 @@ export class GameScene extends Phaser.Scene {
     
     // Émettre un événement pour que la UIScene puisse mettre à jour l'affichage
     this.events.emit('updateResources', resources);
+  }
+
+  // Gestionnaire d'événement quand le joueur appuie sur la souris
+  private handlePointerDown(pointer: Phaser.Input.Pointer) {
+    // Si le joueur n'est pas en mode outil, ignorer
+    if (!this.isToolMode || !this.player || !this.tool) return;
+    
+    // Activer le minage
+    this.isMiningActive = true;
+    
+    // Démarrer immédiatement l'animation
+    this.animatePickaxe();
+  }
+  
+  // Gestionnaire d'événement quand le joueur relâche la souris
+  private handlePointerUp() {
+    this.isMiningActive = false;
+    this.isHarvesting = false;
+    this.harvestTarget = null;
+  }
+  
+  // Animation de pioche plus visible et naturelle
+  private animatePickaxe() {
+    if (!this.tool || !this.isMiningActive) return;
+    
+    // Si une animation est déjà en cours, ne pas la redémarrer
+    if (this.tool.getData('animating')) return;
+    
+    // Marquer comme en cours d'animation
+    this.tool.setData('animating', true);
+    
+    // Point d'origine (point de pivot) pour l'animation
+    const pivotX = this.actualX;
+    const pivotY = this.actualY;
+    
+    // Angle vers la cible (souris ou ressource)
+    const pointerX = this.input.activePointer.worldX;
+    const pointerY = this.input.activePointer.worldY;
+    const targetAngle = Phaser.Math.Angle.Between(pivotX, pivotY, pointerX, pointerY);
+    
+    // Rotation de base de la pioche (vers le pointeur)
+    this.tool.setRotation(targetAngle);
+    
+    // Calculer la position de départ de la pioche (légèrement décalée du joueur)
+    const offsetDistance = 10; // Distance en pixels
+    const offsetX = Math.cos(targetAngle) * offsetDistance;
+    const offsetY = Math.sin(targetAngle) * offsetDistance;
+    
+    // Stocker l'offset dans les données de l'outil pour l'utiliser dans updateToolAnimation
+    this.tool.setData('offsetX', offsetX);
+    this.tool.setData('offsetY', offsetY);
+    
+    // Réinitialiser les données d'animation
+    this.tool.setData('animationStep', 0);  // Étape d'animation actuelle
+    this.tool.setData('targetAngle', targetAngle);  // Angle ciblé
+    this.tool.setData('animationTime', 0);  // Temps d'animation écoulé
+    this.tool.setData('animationDuration', 600);  // Durée totale d'animation (ms) - ralentie à 600ms
+    
+    // EFFET VISUEL: Ajouter un flash léger au début de l'animation
+    this.tool.setTint(0xffffbb);
+    this.tweens.add({
+      targets: this.tool,
+      tint: 0xffffff,
+      duration: 250, // Prolonger la durée du flash
+      ease: 'Linear'
+    });
+  }
+  
+  // Mise à jour de l'animation de l'outil frame par frame
+  private updateToolAnimation(time: number, delta: number) {
+    if (!this.tool || !this.isMiningActive) return;
+    
+    // Vérifier si on est en animation
+    if (!this.tool.getData('animating')) return;
+    
+    // Augmenter le compteur de temps
+    let animTime = this.tool.getData('animationTime') || 0;
+    animTime += delta;
+    this.tool.setData('animationTime', animTime);
+    
+    // Récupérer les données d'animation
+    const duration = this.tool.getData('animationDuration');
+    const targetAngle = this.tool.getData('targetAngle');
+    const offsetX = this.tool.getData('offsetX') || 0;
+    const offsetY = this.tool.getData('offsetY') || 0;
+    
+    // Calculer la progression (0 à 1)
+    const progress = Math.min(1, animTime / duration);
+    
+    // Calculer l'angle actuel selon la courbe d'animation
+    let currentRotation;
+    
+    if (progress < 0.4) {  // Phase 1 rallongée (0-40% du temps)
+      // Phase 1: Lever la pioche en arrière
+      const phase1Progress = progress / 0.4;
+      const easeBack = this.easeInOutQuad(phase1Progress);
+      currentRotation = targetAngle - Math.PI/3 * easeBack; // Angle plus prononcé
+      
+      // Augmenter légèrement l'échelle pendant la phase de préparation
+      this.tool.setScale(1.0 + 0.15 * easeBack);
+    } else if (progress < 0.6) {  // Phase 2 rallongée (40-60% du temps)
+      // Phase 2: Frapper vers l'avant rapidement
+      const phase2Progress = (progress - 0.4) / 0.2;
+      const easeStrike = this.easeInCubic(phase2Progress);
+      currentRotation = targetAngle - Math.PI/3 + Math.PI/2 * easeStrike; // Rotation plus forte
+      
+      // Réduire légèrement l'échelle pendant la frappe pour donner un sentiment d'impact
+      this.tool.setScale(1.15 - 0.25 * easeStrike);
+    } else if (progress < 1) {  // Phase 3 (60-100% du temps)
+      // Phase 3: Retour à la position normale
+      const phase3Progress = (progress - 0.6) / 0.4;
+      const easeReturn = this.easeOutBack(phase3Progress);
+      currentRotation = targetAngle + Math.PI/6 - Math.PI/6 * easeReturn;
+      
+      // Revenir à l'échelle normale
+      this.tool.setScale(0.9 + 0.1 * easeReturn);
+    } else {
+      // Animation terminée
+      currentRotation = targetAngle;
+      this.tool.setScale(1.0);
+      this.tool.setData('animating', false);
+      
+      // Recommencer l'animation si on continue de miner
+      if (this.isMiningActive) {
+        this.animatePickaxe();
+      }
+    }
+    
+    // Appliquer la rotation
+    if (this.tool) {
+      this.tool.setRotation(currentRotation);
+      
+      // Appliquer la position avec l'offset
+      if (this.player) {
+        // Calculer un offset dynamique qui varie selon la phase de l'animation
+        let dynamicOffsetMultiplier = 1.0;
+        
+        // Pendant la phase de frappe, augmenter l'offset pour accentuer le mouvement
+        if (progress > 0.4 && progress < 0.6) {
+          dynamicOffsetMultiplier = 1.5;
+        }
+        
+        // EFFET VISUEL: Ajouter un léger tremblement pendant la phase de frappe
+        if (progress > 0.4 && progress < 0.6) {
+          const shakeIntensity = 0.8; // Tremblement plus prononcé
+          this.tool.x = this.player.x + offsetX * dynamicOffsetMultiplier + Math.random() * shakeIntensity - shakeIntensity/2;
+          this.tool.y = this.player.y + offsetY * dynamicOffsetMultiplier + Math.random() * shakeIntensity - shakeIntensity/2;
+        } else {
+          this.tool.x = this.player.x + offsetX * dynamicOffsetMultiplier;
+          this.tool.y = this.player.y + offsetY * dynamicOffsetMultiplier;
+        }
+      }
+    }
+  }
+  
+  // Fonctions d'accélération pour des animations plus naturelles
+  private easeInOutQuad(t: number): number {
+    return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  }
+  
+  private easeInCubic(t: number): number {
+    return t * t * t;
+  }
+  
+  private easeOutBack(t: number): number {
+    const c1 = 1.70158;
+    const c3 = c1 + 1;
+    return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+  }
+  
+  // Mettre à jour l'animation de récolte
+  private updateMining(time: number) {
+    // Vérifier s'il y a une ressource sous la pioche
+    const resourceHit = this.checkToolResourceCollision();
+    
+    // Si on touche une ressource
+    if (resourceHit) {
+      // Activer l'état de récolte
+      this.isHarvesting = true;
+      this.harvestTarget = resourceHit;
+      
+      // Vérifier si on peut collecter une ressource (cooldown)
+      if (time - this.miningConfig.lastCollectTime >= this.miningConfig.cooldown) {
+        // Collecter la ressource
+        this.collectResource(resourceHit);
+        this.miningConfig.lastCollectTime = time;
+      }
+    } else {
+      // Si on ne touche plus de ressource, désactiver l'état de récolte
+      this.isHarvesting = false;
+      this.harvestTarget = null;
+    }
+  }
+  
+  // Collecter une ressource
+  private collectResource(resource: { id: string, type: string }) {
+    // Vérifier si la ressource existe
+    const resourceSprite = this.resourceSprites.get(resource.id);
+    if (!resourceSprite) return;
+    
+    // Vérifier si la ressource n'est pas déjà épuisée
+    const amount = resourceSprite.getData('amount');
+    if (amount <= 0) return;
+    
+    // Envoyer un message au serveur pour récolter
+    if (this.room) {
+      this.room.send("harvest", {
+        resourceId: resource.id,
+        type: resource.type
+      });
+      
+      // Ajouter l'effet de tremblement
+      this.addShakeEffect(resourceSprite, 0.5);
+      
+      // Afficher l'effet +1
+      this.showNumericEffect('+1', resourceSprite.x, resourceSprite.y, resource.type);
+    }
+  }
+  
+  // Initialisation des écouteurs d'événements pour les ressources
+  private initializeResourceListeners() {
+    if (!this.room) return;
+
+    // Mise à jour d'une ressource
+    this.room.onMessage("resourceUpdate", (data: {
+      resourceId: string,
+      amount: number,
+      playerId: string,
+      resourceType: string
+    }) => {
+      const resourceSprite = this.resourceSprites.get(data.resourceId);
+      if (resourceSprite) {
+        resourceSprite.setData('amount', data.amount);
+        
+        // Si c'est nous qui avons récolté, mettre à jour l'UI
+        if (data.playerId === this.room.sessionId) {
+          this.updateResourcesUI();
+        }
+      }
+    });
+
+    // Ressource épuisée
+    this.room.onMessage("resourceDepleted", (data: {
+      resourceId: string,
+      respawnTime: number
+    }) => {
+      const resourceSprite = this.resourceSprites.get(data.resourceId);
+      if (resourceSprite) {
+        // Effet visuel pour l'épuisement
+        this.tweens.add({
+          targets: resourceSprite,
+          alpha: 0.5,
+          duration: 500,
+          ease: 'Power2'
+        });
+        
+        // Mettre à jour l'état
+        resourceSprite.setData('amount', 0);
+        resourceSprite.setData('isRespawning', true);
+      }
+    });
+
+    // Réapparition d'une ressource
+    this.room.onMessage("resourceRespawned", (data: {
+      resourceId: string,
+      amount: number
+    }) => {
+      const resourceSprite = this.resourceSprites.get(data.resourceId);
+      if (resourceSprite) {
+        // Effet visuel pour la réapparition
+        this.tweens.add({
+          targets: resourceSprite,
+          alpha: 1,
+          duration: 500,
+          ease: 'Power2'
+        });
+        
+        // Mettre à jour l'état
+        resourceSprite.setData('amount', data.amount);
+        resourceSprite.setData('isRespawning', false);
+      }
+    });
+  }
+
+  // Création d'une ressource
+  private createResource(type: string, x: number, y: number): Phaser.GameObjects.Sprite {
+    console.log(`Création d'une ressource de type ${type} à la position (${x}, ${y})`);
+    
+    const sprite = this.add.sprite(x, y, type);
+    sprite.setData('type', type);
+    sprite.setData('amount', this.miningConfig.resourceAmounts[type] || 100);
+    sprite.setData('isRespawning', false);
+    
+    // Définir la profondeur pour s'assurer que la ressource est visible
+    sprite.setDepth(5);
+    
+    // Ajouter une interaction au clic
+    sprite.setInteractive();
+    
+    // Vérifier que le sprite a été créé correctement
+    if (!sprite.texture || sprite.texture.key !== type) {
+      console.error(`Erreur: La texture ${type} n'a pas été chargée correctement`);
+    } else {
+      console.log(`Ressource créée avec succès: ${type} (${sprite.width}x${sprite.height})`);
+    }
+    
+    return sprite;
+  }
+  
+  // Faire disparaître une ressource épuisée
+  private depleteResource(sprite: Phaser.GameObjects.Sprite, resourceId: string) {
+    // Désactiver l'interactivité pendant l'animation
+    sprite.disableInteractive();
+    
+    // Animation de disparition
+    this.tweens.add({
+      targets: sprite,
+      alpha: 0,
+      scale: 0.8,
+      duration: 1000,
+      ease: 'Power1',
+      onComplete: () => {
+        // Supprimer la ressource une fois l'animation terminée
+        sprite.destroy();
+        this.resourceSprites.delete(resourceId);
+      }
+    });
+  }
+  
+  // Afficher un effet numérique flottant
+  private showNumericEffect(text: string, x: number, y: number, type: string = '') {
+    if (!this.numericEffects) return;
+
+    const color = type === 'gold' ? '#FFD700' : 
+                 type === 'wood' ? '#8B4513' : 
+                 type === 'stone' ? '#808080' : '#FFFFFF';
+
+    const effect = this.add.text(x, y - 20, text, {
+      fontSize: '16px',
+      color: color,
+      stroke: '#000000',
+      strokeThickness: 2
+    });
+    effect.setOrigin(0.5);
+    effect.setDepth(100);
+
+    this.tweens.add({
+      targets: effect,
+      y: y - 40,
+      alpha: 0,
+      duration: 1000,
+      ease: 'Power2',
+      onComplete: () => {
+        effect.destroy();
+      }
+    });
+  }
+  
+  // Ajouter un petit effet de secousse à un sprite
+  private addShakeEffect(sprite: Phaser.GameObjects.Sprite, intensity: number = 1) {
+    // Sauvegarder la position originale
+    const originalX = sprite.x;
+    const originalY = sprite.y;
+    
+    // Réduire l'intensité de vibration
+    const offset = intensity;
+    
+    // Créer une séquence de secousse
+    const shakeSequence = [
+      { x: offset, y: 0 },
+      { x: 0, y: offset },
+      { x: -offset, y: 0 },
+      { x: 0, y: -offset },
+      { x: 0, y: 0 }
+    ];
+    
+    // Fonction pour créer un tween
+    const createNextTween = (index: number) => {
+      if (index >= shakeSequence.length) return;
+      
+      const shake = shakeSequence[index];
+      this.tweens.add({
+        targets: sprite,
+        x: originalX + shake.x,
+        y: originalY + shake.y,
+        duration: 25,
+        ease: 'Power1',
+        onComplete: () => {
+          createNextTween(index + 1);
+        }
+      });
+    };
+    
+    // Démarrer la séquence
+    createNextTween(0);
+  }
+
+  // Vérifier si l'outil est en collision avec une ressource
+  private checkToolResourceCollision(): { id: string, type: string } | null {
+    if (!this.tool) return null;
+    
+    // Position de l'outil
+    const toolX = this.tool.x;
+    const toolY = this.tool.y;
+    const toolRadius = 8; // Rayon approximatif de l'outil pour la détection
+    
+    // Vérifier chaque ressource
+    for (const [resourceId, resourceSprite] of this.resourceSprites.entries()) {
+      const resourceX = resourceSprite.x;
+      const resourceY = resourceSprite.y;
+      const distance = Phaser.Math.Distance.Between(toolX, toolY, resourceX, resourceY);
+      
+      // Distance de détection variable selon le type de ressource
+      let detectionRadius = 16; // Valeur par défaut
+      
+      switch (resourceSprite.texture.key) {
+        case 'gold':
+          detectionRadius = 14;
+          break;
+        case 'wood':
+          // Pour le bois, vérifier à la fois le tronc et le feuillage
+          if (toolX > resourceX - 8 && toolX < resourceX + 8 && 
+              toolY > resourceY - 8 && toolY < resourceY + 20) {
+            return { id: resourceId, type: resourceSprite.texture.key };
+          }
+          if (Phaser.Math.Distance.Between(toolX, toolY, resourceX, resourceY - 10) < 16) {
+            return { id: resourceId, type: resourceSprite.texture.key };
+          }
+          continue;
+        case 'stone':
+          detectionRadius = 18;
+          break;
+      }
+      
+      // Vérifier si l'outil est en collision avec la ressource
+      if (distance < toolRadius + detectionRadius) {
+        return { id: resourceId, type: resourceSprite.texture.key };
+      }
+    }
+    
+    return null;
+  }
+
+  // Créer une tuile de base
+  private createTile(type: string, x: number, y: number): Phaser.GameObjects.Image {
+    // Créer l'image de la tuile
+    const tile = this.add.image(x, y, type);
+    tile.setOrigin(0.5);
+    tile.setDepth(1); // Profondeur standard pour les tuiles de base
+    
+    return tile;
   }
 } 

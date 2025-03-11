@@ -1,5 +1,5 @@
 import Phaser from 'phaser';
-import { ResourceType, BuildingType } from 'shared';
+import { ResourceType, BuildingType, TILE_SIZE } from 'shared';
 
 export class UIScene extends Phaser.Scene {
   // Éléments UI
@@ -162,49 +162,89 @@ export class UIScene extends Phaser.Scene {
     if (!gameInstance.player || !gameInstance.resourceSprites) return;
     
     // Récupérer les dimensions de la mini-carte
-    const width = 180;  // Augmenté de 150 à 180
-    const height = 180; // Augmenté de 150 à 180
+    const width = 180;
+    const height = 180;
     const x = this.cameras.main.width - width - 10;
     const y = this.cameras.main.height - height - 10;
     
-    // Échelle de la mini-carte (monde du jeu -> mini-carte)
-    const mapScale = 0.05; // Ajuster selon la taille du monde
+    // Calculer la taille réelle de la carte
+    const mapWidth = gameInstance.mapLines[0]?.length * TILE_SIZE || 3200;
+    const mapHeight = gameInstance.mapLines.length * TILE_SIZE || 3200;
+    
+    // Calculer l'échelle en fonction de la taille de la carte
+    const scaleX = width / mapWidth;
+    const scaleY = height / mapHeight;
+    const mapScale = Math.min(scaleX, scaleY);
+    
+    // Calculer les offsets pour centrer la carte dans la minimap
+    const offsetX = x + (width - mapWidth * mapScale) / 2;
+    const offsetY = y + (height - mapHeight * mapScale) / 2;
     
     // Effacer la mini-carte précédente sauf le fond
     this.minimap.clear();
-    this.minimap.fillStyle(0x000000, 0.9); // Augmenté de 0.5 à 0.7 pour meilleure visibilité
+    this.minimap.fillStyle(0x000000, 0.9);
     this.minimap.fillRect(x, y, width, height);
     this.minimap.lineStyle(1, 0x444444);
     this.minimap.strokeRect(x, y, width, height);
     
+    // Dessiner le cadre de la zone de jeu
+    this.minimap.lineStyle(1, 0x666666);
+    this.minimap.strokeRect(
+      offsetX,
+      offsetY,
+      mapWidth * mapScale,
+      mapHeight * mapScale
+    );
+    
     // Dessiner les ressources
     if (gameInstance.resourceSprites.size > 0) {
       gameInstance.resourceSprites.forEach((sprite, key) => {
-        // Déterminer la couleur en fonction du type de ressource
-        let color;
-        if (key.includes('gold')) color = 0xFFD700;
-        else if (key.includes('wood')) color = 0x8B4513;
-        else if (key.includes('stone')) color = 0x808080;
-        else color = 0xFFFFFF;
+        // Vérifier si la tuile contenant cette ressource a été découverte
+        const tileX = Math.floor(sprite.x / TILE_SIZE);
+        const tileY = Math.floor(sprite.y / TILE_SIZE);
+        const tileKey = `${tileX},${tileY}`;
         
-        // Calculer la position sur la mini-carte
-        const miniX = x + (sprite.x * mapScale);
-        const miniY = y + (sprite.y * mapScale);
-        
-        // Dessiner un point pour cette ressource avec opacité augmentée
-        this.minimap.fillStyle(color, 1);  // Opacité augmentée de 0.6 à 0.9
-        this.minimap.fillRect(miniX, miniY, 0.8, 0.8);  // Garder la petite taille
+        // Ne dessiner la ressource que si sa tuile a été découverte
+        if (gameInstance.loadedTiles.has(tileKey)) {
+          let color;
+          if (key.includes('gold')) color = 0xFFD700;
+          else if (key.includes('wood')) color = 0x8B4513;
+          else if (key.includes('stone')) color = 0x808080;
+          else color = 0xFFFFFF;
+          
+          // Calculer la position sur la mini-carte avec les offsets
+          const miniX = offsetX + (sprite.x * mapScale);
+          const miniY = offsetY + (sprite.y * mapScale);
+          
+          this.minimap.fillStyle(color, 1);
+          this.minimap.fillRect(miniX - 1, miniY - 1, 2, 2);
+        }
       });
     }
     
-    // Dessiner le joueur avec opacité maximale
+    // Dessiner les zones explorées avec une légère teinte
+    if (gameInstance.loadedTiles.size > 0) {
+      this.minimap.fillStyle(0x444444, 0.3);
+      gameInstance.loadedTiles.forEach(tileKey => {
+        const [tileX, tileY] = tileKey.split(',').map(Number);
+        const miniX = offsetX + (tileX * TILE_SIZE * mapScale);
+        const miniY = offsetY + (tileY * TILE_SIZE * mapScale);
+        this.minimap.fillRect(
+          miniX,
+          miniY,
+          TILE_SIZE * mapScale,
+          TILE_SIZE * mapScale
+        );
+      });
+    }
+    
+    // Dessiner le joueur
     if (gameInstance.player) {
-      const playerX = x + (gameInstance.actualX * mapScale);
-      const playerY = y + (gameInstance.actualY * mapScale);
+      const playerX = offsetX + (gameInstance.actualX * mapScale);
+      const playerY = offsetY + (gameInstance.actualY * mapScale);
       
-      // Dessiner un point plus grand pour le joueur
-      this.minimap.fillStyle(0xFF0000, 1);  // Opacité maximale
-      this.minimap.fillCircle(playerX, playerY, 3);
+      this.minimap.fillStyle(0xFF0000, 1);
+      this.minimap.fillCircle(playerX, playerY, 2);
     }
   }
   
