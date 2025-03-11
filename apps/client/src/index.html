@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PvPStrat.io</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background-color: #000;
+    }
+    
+    canvas {
+      image-rendering: optimizeSpeed;             /* Older versions of FF */
+      image-rendering: -moz-crisp-edges;          /* FF 6.0+ */
+      image-rendering: -webkit-optimize-contrast; /* Safari */
+      image-rendering: -o-crisp-edges;            /* Opera */
+      image-rendering: pixelated;                 /* Modern browsers */
+      image-rendering: crisp-edges;               /* Autre option pour les navigateurs modernes */
+      -ms-interpolation-mode: nearest-neighbor;   /* IE (non-standard) */
+    }
+  </style>
+</head>
+<body>
+  <div id="phaser-container"></div>
+  <script type="module" src="./main.tsx"></script>
+</body>
+</html> 
