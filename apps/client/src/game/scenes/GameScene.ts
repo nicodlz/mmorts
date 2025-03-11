@@ -7,13 +7,14 @@ import {
   ResourceSchema,
   TILE_SIZE,
   CHUNK_SIZE,
-  ResourceType
+  ResourceType,
+  BUILDING_COSTS
 } from 'shared';
 
 export class GameScene extends Phaser.Scene {
   // Client Colyseus
   private client: Client;
-  private room: any;
+  private room: any; // Type à définir plus précisément plus tard
   
   // Éléments de jeu
   private player?: Phaser.GameObjects.Container;
@@ -32,6 +33,7 @@ export class GameScene extends Phaser.Scene {
   
   // Groupes d'objets
   private resourceSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
+  private visibleResources: Set<string> = new Set(); // Ressources actuellement visibles
   private unitSprites: Map<string, { 
     sprite: Phaser.GameObjects.Container; 
     targetX: number; 
@@ -43,29 +45,30 @@ export class GameScene extends Phaser.Scene {
   // Stockage de la carte pour le chargement dynamique
   private mapData: string = '';
   private mapLines: string[] = [];
-  private tileSize: number = 32;
+  private tileSize: number = TILE_SIZE;
   private loadedTiles: Set<string> = new Set(); // Garder trace des tuiles déjà chargées
-  private renderDistance: number = 25; // Augmenté de 15 à 25 pour charger les chunks plus tôt
+  private renderDistance: number = 3; // Distance en chunks (augmentée de 2 à 3)
+  private loadedChunks: Set<string> = new Set(); // Garder trace des chunks chargés
   
   // Mode de jeu
   private isToolMode: boolean = true;
   
   // Paramètres d'interpolation
-  private readonly LERP_FACTOR: number = 0.08; // Facteur d'interpolation réduit pour éviter les à-coups
-  private readonly NETWORK_UPDATE_RATE: number = 100; // Millisecondes entre chaque mise à jour réseau
+  private readonly LERP_FACTOR: number = 0.08;
+  private readonly NETWORK_UPDATE_RATE: number = 100;
   private lastNetworkUpdate: number = 0;
   
   // Dernière position chargée pour éviter le rechargement constant
   private lastLoadedChunkX: number = -1;
   private lastLoadedChunkY: number = -1;
-  private readonly CHUNK_SIZE: number = 8; // Taille des chunks en tuiles
+  private readonly CHUNK_SIZE: number = CHUNK_SIZE; // Utiliser la constante partagée
   
   // Ajouter ces propriétés privées dans la classe
   private tileLayers: Map<string, Phaser.GameObjects.Image> = new Map();
   private tilePool: Phaser.GameObjects.Image[] = [];
   private maxTilePoolSize: number = 500;
   private lastCleanupTime: number = 0;
-  private cleanupInterval: number = 5000; // 5 secondes entre les nettoyages
+  private cleanupInterval: number = 5000;
   
   // Propriétés supplémentaires
   private lastPlayerX: number = 0;
@@ -102,6 +105,17 @@ export class GameScene extends Phaser.Scene {
     }
   };
   
+  // Propriétés pour la construction
+  private buildingPreview: Phaser.GameObjects.Sprite | null = null;
+  private isPlacingBuilding: boolean = false;
+  private selectedBuildingType: string | null = null;
+  private canPlaceBuilding: boolean = true;
+  
+  // Paramètres d'optimisation du rendu
+  private lastRenderOptimization: number = 0;
+  private readonly RENDER_OPTIMIZATION_INTERVAL: number = 500; // ms entre les optimisations
+  private visibleScreenRect: Phaser.Geom.Rectangle = new Phaser.Geom.Rectangle(0, 0, 0, 0);
+  
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
@@ -112,7 +126,7 @@ export class GameScene extends Phaser.Scene {
     // Log le début du chargement
     console.log("Début du chargement des assets");
     
-    // Désactiver l'interpolation sur toutes les textures (utiliser nearest neighbor pour le pixel art)
+    // Désactiver l'interpolation sur toutes les textures
     this.textures.on('addtexture', (key: string) => {
       console.log(`Configurant texture ${key} en mode NEAREST`);
       this.textures.list[key].setFilter(Phaser.Textures.NEAREST);
@@ -132,6 +146,17 @@ export class GameScene extends Phaser.Scene {
     this.load.image('gold', 'sprites/gold.png');
     this.load.image('wood', 'sprites/tree2.png');
     this.load.image('stone', 'sprites/stone2.png');
+    
+    // Charger les sprites des bâtiments
+    this.load.image('forge', 'sprites/buildings/forge.png');
+    this.load.image('house', 'sprites/buildings/house.png');
+    this.load.image('furnace', 'sprites/buildings/furnace.png');
+    this.load.image('factory', 'sprites/buildings/factory.png');
+    this.load.image('tower', 'sprites/buildings/tower.png');
+    this.load.image('barracks', 'sprites/buildings/barracks.png');
+    this.load.image('town_center', 'sprites/buildings/town_center.png');
+    this.load.image('yard', 'sprites/buildings/yard.png');
+    this.load.image('cabin', 'sprites/buildings/cabin.png');
     
     // Charger les tuiles de terrain
     this.load.image('grass', 'sprites/grass.png');
@@ -334,6 +359,51 @@ export class GameScene extends Phaser.Scene {
 
     // Créer un groupe pour les effets numériques
     this.numericEffects = this.add.group();
+
+    // Écouter les événements de construction
+    this.events.on('buildingSelected', (buildingType: string) => {
+      this.startPlacingBuilding(buildingType);
+    });
+
+    // Ajouter les événements de la souris pour la construction
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (this.isPlacingBuilding && this.buildingPreview) {
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        const tileX = Math.floor(worldPoint.x / TILE_SIZE) * TILE_SIZE;
+        const tileY = Math.floor(worldPoint.y / TILE_SIZE) * TILE_SIZE;
+        
+        this.buildingPreview.setPosition(tileX + TILE_SIZE/2, tileY + TILE_SIZE/2);
+        
+        // Vérifier si on peut placer le bâtiment ici
+        this.canPlaceBuilding = this.checkCanPlaceBuilding(tileX, tileY);
+        this.buildingPreview.setTint(this.canPlaceBuilding ? 0xffffff : 0xff0000);
+      }
+    });
+
+    this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (this.isPlacingBuilding && this.selectedBuildingType && this.canPlaceBuilding) {
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        const tileX = Math.floor(worldPoint.x / TILE_SIZE) * TILE_SIZE;
+        const tileY = Math.floor(worldPoint.y / TILE_SIZE) * TILE_SIZE;
+        
+        // Envoyer la demande de construction au serveur
+        this.room.send("build", {
+          type: this.selectedBuildingType,
+          x: tileX,
+          y: tileY
+        });
+        
+        // Arrêter le mode placement
+        this.stopPlacingBuilding();
+      }
+    });
+
+    // Écouter la touche Escape pour annuler la construction
+    this.input.keyboard?.on('keydown-ESC', () => {
+      if (this.isPlacingBuilding) {
+        this.stopPlacingBuilding();
+      }
+    });
   }
   
   update(time: number, delta: number) {
@@ -343,11 +413,18 @@ export class GameScene extends Phaser.Scene {
     const playerChunkX = Math.floor(this.actualX / (this.tileSize * this.CHUNK_SIZE));
     const playerChunkY = Math.floor(this.actualY / (this.tileSize * this.CHUNK_SIZE));
     
-    // Ne charger les tuiles que si le joueur a changé de chunk
+    // Ne charger les chunks que si le joueur a changé de chunk
     if (playerChunkX !== this.lastLoadedChunkX || playerChunkY !== this.lastLoadedChunkY) {
-      this.updateVisibleTiles();
+      // Remplacer updateVisibleTiles par updateVisibleChunks
+      this.updateVisibleChunks(playerChunkX, playerChunkY);
       this.lastLoadedChunkX = playerChunkX;
       this.lastLoadedChunkY = playerChunkY;
+    }
+    
+    // Optimiser le rendu en désactivant les objets hors écran
+    if (time - this.lastRenderOptimization > this.RENDER_OPTIMIZATION_INTERVAL) {
+      this.optimizeRendering();
+      this.lastRenderOptimization = time;
     }
     
     // Gérer le mouvement du joueur
@@ -732,6 +809,119 @@ export class GameScene extends Phaser.Scene {
         this.resourceSprites.delete(resourceId);
       }
     };
+
+    // Écouter l'ajout de bâtiments
+    this.room.state.buildings.onAdd = (building: any, buildingId: string) => {
+      console.log(`Bâtiment ajouté: ${buildingId} (type: ${building.type}, position: ${building.x}, ${building.y})`);
+      
+      // Créer le sprite du bâtiment
+      const sprite = this.add.sprite(building.x, building.y, building.type.toLowerCase());
+      sprite.setDepth(8); // Au-dessus du sol mais en-dessous des joueurs
+      
+      // Stocker la référence au sprite
+      this.buildingSprites.set(buildingId, sprite);
+    };
+    
+    // Écouter les modifications des bâtiments
+    this.room.state.buildings.onChange = (building: any, buildingId: string) => {
+      // Récupérer le sprite correspondant
+      const buildingSprite = this.buildingSprites.get(buildingId);
+      if (!buildingSprite) return;
+      
+      // Mettre à jour la position si elle a changé
+      if (building.x !== undefined && building.y !== undefined) {
+        buildingSprite.setPosition(building.x, building.y);
+      }
+      
+      // Mettre à jour d'autres propriétés si nécessaire (santé, état, etc.)
+      if (building.health !== undefined) {
+        // Ajouter une barre de vie ou un indicateur visuel si nécessaire
+      }
+    };
+    
+    // Écouter les suppressions de bâtiments
+    this.room.state.buildings.onRemove = (building: any, buildingId: string) => {
+      console.log(`Bâtiment supprimé: ${buildingId}`);
+      
+      // Récupérer et supprimer le sprite
+      const buildingSprite = this.buildingSprites.get(buildingId);
+      if (buildingSprite) {
+        // Ajouter une animation de destruction si nécessaire
+        this.tweens.add({
+          targets: buildingSprite,
+          alpha: 0,
+          scale: 0.8,
+          duration: 500,
+          ease: 'Power2',
+          onComplete: () => {
+            buildingSprite.destroy();
+            this.buildingSprites.delete(buildingId);
+          }
+        });
+      }
+    };
+
+    // Gestionnaire pour les ressources initiales
+    this.room.onMessage("initialResources", (resources: any[]) => {
+      console.log("Réception des ressources initiales:", resources.length);
+      
+      // Supprimer toutes les ressources existantes
+      this.resourceSprites.forEach(sprite => sprite.destroy());
+      this.resourceSprites.clear();
+      this.visibleResources.clear();
+      
+      // Créer les sprites pour les nouvelles ressources
+      resources.forEach(resource => {
+        this.createResourceSprite(resource);
+        this.visibleResources.add(resource.id);
+      });
+    });
+
+    // Gestionnaire pour les mises à jour des ressources visibles
+    this.room.onMessage("updateVisibleResources", (resources: any[]) => {
+      console.log(`=== Mise à jour des ressources visibles: ${resources.length} ressources reçues ===`);
+      
+      // Créer un ensemble des nouvelles ressources
+      const newResourceIds = new Set(resources.map(r => r.id));
+      
+      // Log détaillé des ressources reçues
+      console.log("Ressources reçues:", resources.map(r => `${r.id} (${r.type})`).join(', '));
+      console.log("Ressources actuellement visibles:", Array.from(this.visibleResources).join(', '));
+      
+      // Supprimer les ressources qui ne sont plus visibles
+      let removedCount = 0;
+      this.visibleResources.forEach(id => {
+        if (!newResourceIds.has(id)) {
+          const sprite = this.resourceSprites.get(id);
+          if (sprite) {
+            sprite.destroy();
+            this.resourceSprites.delete(id);
+            removedCount++;
+          }
+          this.visibleResources.delete(id);
+        }
+      });
+      
+      // Ajouter ou mettre à jour les nouvelles ressources
+      let addedCount = 0;
+      resources.forEach(resource => {
+        if (!this.visibleResources.has(resource.id)) {
+          this.createResourceSprite(resource);
+          this.visibleResources.add(resource.id);
+          addedCount++;
+        } else {
+          // Mettre à jour la ressource existante si nécessaire
+          const sprite = this.resourceSprites.get(resource.id);
+          if (sprite) {
+            sprite.setPosition(resource.x, resource.y);
+            // Mettre à jour d'autres propriétés si nécessaire
+          }
+        }
+      });
+      
+      console.log(`Ressources supprimées: ${removedCount}, ajoutées: ${addedCount}`);
+      console.log(`Total des ressources visibles: ${this.visibleResources.size}`);
+    });
   }
   
   // Crée un sprite pour un autre joueur
@@ -1057,18 +1247,14 @@ export class GameScene extends Phaser.Scene {
   
   // Synchroniser la position avec le serveur
   private synchronizePlayerPosition() {
-    if (!this.room || !this.playerEntity) return;
+    if (!this.room) return;
     
-    this.room.send('move', {
+    // Envoyer les coordonnées actuelles (précises) au serveur
+    console.log(`Envoi position au serveur: (${this.actualX}, ${this.actualY})`);
+    
+    this.room.send("move", {
       x: this.actualX,
       y: this.actualY
-    });
-    
-    // Émettre un événement pour mettre à jour la position sur la mini-carte
-    this.events.emit('updatePlayerPosition', {
-      x: this.actualX,
-      y: this.actualY,
-      resources: this.resourceSprites
     });
   }
   
@@ -1227,20 +1413,27 @@ export class GameScene extends Phaser.Scene {
     
     console.log("Nettoyage des tuiles éloignées");
     
-    // Calculer les coordonnées de la tuile sur laquelle se trouve le joueur
-    const playerTileX = Math.floor(this.player.x / this.tileSize);
-    const playerTileY = Math.floor(this.player.y / this.tileSize);
+    // Calculer les coordonnées du chunk sur lequel se trouve le joueur
+    const playerChunkX = Math.floor(this.player.x / (this.tileSize * this.CHUNK_SIZE));
+    const playerChunkY = Math.floor(this.player.y / (this.tileSize * this.CHUNK_SIZE));
     
     // Distance maximale pour le nettoyage (plus grande que renderDistance pour éviter les nettoyages fréquents)
-    const cleanupDistance = this.renderDistance + 15;
+    const cleanupDistance = this.renderDistance + 1;
     
     // Parcourir toutes les tuiles chargées
     this.tileLayers.forEach((tile, key) => {
       // Extraire les coordonnées de la clé (format "x,y")
-      const [x, y] = key.split(',').map(Number);
+      const [tileX, tileY] = key.split(',').map(Number);
       
-      // Calculer la distance au joueur
-      const distance = Math.max(Math.abs(x - playerTileX), Math.abs(y - playerTileY));
+      // Calculer le chunk de cette tuile
+      const tileChunkX = Math.floor(tileX / this.CHUNK_SIZE);
+      const tileChunkY = Math.floor(tileY / this.CHUNK_SIZE);
+      
+      // Calculer la distance en chunks au joueur
+      const distance = Math.max(
+        Math.abs(tileChunkX - playerChunkX), 
+        Math.abs(tileChunkY - playerChunkY)
+      );
       
       // Si la tuile est trop éloignée, la supprimer
       if (distance > cleanupDistance) {
@@ -1257,83 +1450,132 @@ export class GameScene extends Phaser.Scene {
         this.loadedTiles.delete(key);
       }
     });
-    
-    console.log(`Nombre de tuiles actives: ${this.tileLayers.size}, Pool: ${this.tilePool.length}`);
   }
-  
-  // Méthode de chargement de la carte par chunks
+
+  // Pour toute référence restante à updateVisibleTiles
   private updateVisibleTiles() {
-    if (!this.player || this.mapLines.length === 0) return;
+    // Redirige vers la nouvelle méthode
+    const playerChunkX = Math.floor(this.actualX / (this.tileSize * this.CHUNK_SIZE));
+    const playerChunkY = Math.floor(this.actualY / (this.tileSize * this.CHUNK_SIZE));
+    this.updateVisibleChunks(playerChunkX, playerChunkY);
+  }
+
+  // Méthode de chargement de la carte par chunks
+  private updateVisibleChunks(playerChunkX: number, playerChunkY: number) {
+    console.log(`Mise à jour des chunks visibles autour de (${playerChunkX}, ${playerChunkY})`);
     
-    // Nettoyer les tuiles éloignées
-    this.cleanupDistantTiles(this.game.loop.time);
-    
-    // Calculer les coordonnées de la tuile sur laquelle se trouve le joueur
-    const playerTileX = Math.floor(this.player.x / this.tileSize);
-    const playerTileY = Math.floor(this.player.y / this.tileSize);
-    
-    // Charger les tuiles dans un carré autour du joueur
-    for (let y = playerTileY - this.renderDistance; y <= playerTileY + this.renderDistance; y++) {
-      if (y < 0 || y >= this.mapLines.length) continue;
-      
-      const line = this.mapLines[y];
-      if (!line) continue;
-      
-      for (let x = playerTileX - this.renderDistance; x <= playerTileX + this.renderDistance; x++) {
-        if (x < 0 || x >= line.length) continue;
+    // Calculer les chunks à charger
+    const chunksToLoad = new Set<string>();
+    for (let dy = -this.renderDistance; dy <= this.renderDistance; dy++) {
+      for (let dx = -this.renderDistance; dx <= this.renderDistance; dx++) {
+        const chunkX = playerChunkX + dx;
+        const chunkY = playerChunkY + dy;
+        const chunkKey = `${chunkX},${chunkY}`;
+        chunksToLoad.add(chunkKey);
         
-        // Clé unique pour cette tuile
-        const tileKey = `${x},${y}`;
-        
-        // Ne pas recharger les tuiles déjà rendues
-        if (this.loadedTiles.has(tileKey)) continue;
-        
-        // Marquer cette tuile comme chargée
-        this.loadedTiles.add(tileKey);
-        
-        const tileX = x * this.tileSize;
-        const tileY = y * this.tileSize;
-        const tileChar = line[x];
-        
-        // Utiliser des coordonnées entières pour éviter le scintillement
-        const centerX = Math.round(tileX + this.tileSize/2);
-        const centerY = Math.round(tileY + this.tileSize/2);
-        
-        // Créer le sol (utiliser le pool pour réduire la création d'objets)
-        let randomGrass = 'grass';
-        // Faire en sorte que grass soit 10x plus fréquent que grass2 et grass3
-        const grassRandom = Math.random() * 12; // 0-12 au lieu de 0-3
-        if (grassRandom > 10) { // si > 10 (environ 1/6 des cas), on utilise grass2 ou grass3
-          randomGrass = grassRandom > 11 ? 'grass3' : 'grass2';
-        }
-        
-        // Obtenir une tuile du pool ou en créer une nouvelle
-        const grassTile = this.getTileFromPool(randomGrass);
-        grassTile.setPosition(centerX, centerY);
-        grassTile.setDepth(1); // Tuiles de sol en arrière-plan
-        grassTile.setOrigin(0.5);
-        
-        // Stocker une référence à cette tuile
-        this.tileLayers.set(tileKey, grassTile);
-        
-        // Ajouter des éléments spécifiques sur l'herbe
-        switch (tileChar) {
-          case '#': // Mur
-            const wall = this.createTile('wall', centerX, centerY);
-            wall.setDepth(5);
-            break;
-          case 'W': // Arbre (bois)
-          case 'T': // Arbre (alternative)
-            // Supprimer la création des ressources ici car elles sont gérées par le serveur
-            break;
-          case 'S': // Pierre
-            // Supprimer la création des ressources ici car elles sont gérées par le serveur
-            break;
-          case 'G': // Or
-            // Supprimer la création des ressources ici car elles sont gérées par le serveur
-            break;
+        // Si le chunk n'est pas déjà chargé, le charger
+        if (!this.loadedChunks.has(chunkKey)) {
+          this.loadChunk(chunkX, chunkY);
+          this.loadedChunks.add(chunkKey);
         }
       }
+    }
+    
+    // Décharger les chunks trop éloignés
+    for (const chunkKey of Array.from(this.loadedChunks)) {
+      if (!chunksToLoad.has(chunkKey)) {
+        this.unloadChunk(chunkKey);
+        this.loadedChunks.delete(chunkKey);
+      }
+    }
+    
+    console.log(`Chunks chargés: ${this.loadedChunks.size}`);
+  }
+
+  // Charger un chunk spécifique
+  private loadChunk(chunkX: number, chunkY: number) {
+    console.log(`Chargement du chunk (${chunkX}, ${chunkY})`);
+    const startTileX = chunkX * this.CHUNK_SIZE;
+    const startTileY = chunkY * this.CHUNK_SIZE;
+    
+    // Charger les tuiles du chunk
+    for (let y = 0; y < this.CHUNK_SIZE; y++) {
+      const worldTileY = startTileY + y;
+      if (worldTileY < 0 || worldTileY >= this.mapLines.length) continue;
+      
+      for (let x = 0; x < this.CHUNK_SIZE; x++) {
+        const worldTileX = startTileX + x;
+        if (worldTileX < 0 || worldTileX >= this.mapLines[worldTileY].length) continue;
+        
+        // Utiliser notre méthode existante de création de tuile
+        this.createTileAt(worldTileX, worldTileY);
+      }
+    }
+  }
+
+  // Décharger un chunk
+  private unloadChunk(chunkKey: string) {
+    const [chunkX, chunkY] = chunkKey.split(',').map(Number);
+    const startTileX = chunkX * this.CHUNK_SIZE;
+    const startTileY = chunkY * this.CHUNK_SIZE;
+    
+    // Supprimer les tuiles du chunk
+    for (let y = 0; y < this.CHUNK_SIZE; y++) {
+      const worldTileY = startTileY + y;
+      for (let x = 0; x < this.CHUNK_SIZE; x++) {
+        const worldTileX = startTileX + x;
+        const tileKey = `${worldTileX},${worldTileY}`;
+        
+        const tile = this.tileLayers.get(tileKey);
+        if (tile) {
+          if (this.tilePool.length < this.maxTilePoolSize) {
+            tile.setVisible(false);
+            this.tilePool.push(tile);
+          } else {
+            tile.destroy();
+          }
+          this.tileLayers.delete(tileKey);
+          this.loadedTiles.delete(tileKey);
+        }
+      }
+    }
+  }
+
+  // Créer une tuile à une position spécifique
+  private createTileAt(worldTileX: number, worldTileY: number) {
+    const tileKey = `${worldTileX},${worldTileY}`;
+    if (this.loadedTiles.has(tileKey)) return;
+    
+    // Vérifier si les coordonnées sont valides
+    if (worldTileY < 0 || worldTileY >= this.mapLines.length) return;
+    const line = this.mapLines[worldTileY];
+    if (!line || worldTileX < 0 || worldTileX >= line.length) return;
+    
+    const tileChar = line[worldTileX];
+    
+    const centerX = Math.round(worldTileX * this.tileSize + this.tileSize/2);
+    const centerY = Math.round(worldTileY * this.tileSize + this.tileSize/2);
+    
+    // Créer la tuile de base (herbe)
+    let randomGrass = 'grass';
+    const grassRandom = Math.random() * 12;
+    if (grassRandom > 10) {
+      randomGrass = grassRandom > 11 ? 'grass3' : 'grass2';
+    }
+    
+    const grassTile = this.getTileFromPool(randomGrass);
+    grassTile.setPosition(centerX, centerY);
+    grassTile.setDepth(1);
+    grassTile.setOrigin(0.5);
+    grassTile.setVisible(true);
+    
+    this.tileLayers.set(tileKey, grassTile);
+    this.loadedTiles.add(tileKey);
+    
+    // Ajouter des éléments spécifiques basés sur la carte
+    if (tileChar === '#') {
+      const wall = this.createTile('wall', centerX, centerY);
+      wall.setDepth(5);
     }
   }
   
@@ -1926,5 +2168,127 @@ export class GameScene extends Phaser.Scene {
     tile.setDepth(1); // Profondeur standard pour les tuiles de base
     
     return tile;
+  }
+
+  private startPlacingBuilding(buildingType: string) {
+    this.isPlacingBuilding = true;
+    this.selectedBuildingType = buildingType;
+    
+    // Créer l'aperçu du bâtiment
+    if (this.buildingPreview) {
+      this.buildingPreview.destroy();
+    }
+    
+    this.buildingPreview = this.add.sprite(0, 0, buildingType.toLowerCase());
+    this.buildingPreview.setAlpha(0.7);
+    this.buildingPreview.setDepth(100);
+  }
+
+  private stopPlacingBuilding() {
+    this.isPlacingBuilding = false;
+    this.selectedBuildingType = null;
+    
+    if (this.buildingPreview) {
+      this.buildingPreview.destroy();
+      this.buildingPreview = null;
+    }
+  }
+
+  private checkCanPlaceBuilding(tileX: number, tileY: number): boolean {
+    // Vérifier si le joueur a assez de ressources
+    if (!this.selectedBuildingType || !this.room) return false;
+    
+    const costs = BUILDING_COSTS[this.selectedBuildingType];
+    if (!costs) return false;
+    
+    const player = this.room.state.players.get(this.room.sessionId);
+    if (!player) return false;
+    
+    for (const [resource, amount] of Object.entries(costs)) {
+      const playerResource = player.resources.get(resource) || 0;
+      if (playerResource < amount) {
+        return false;
+      }
+    }
+    
+    // Vérifier si l'emplacement est libre
+    for (const [_, building] of this.room.state.buildings.entries()) {
+      const buildingTileX = Math.floor(building.x / TILE_SIZE) * TILE_SIZE;
+      const buildingTileY = Math.floor(building.y / TILE_SIZE) * TILE_SIZE;
+      
+      if (buildingTileX === tileX && buildingTileY === tileY) {
+        return false;
+      }
+    }
+    
+    return true;
+  }
+
+  // Méthode pour créer un sprite de ressource
+  private createResourceSprite(resource: any) {
+    let sprite: Phaser.GameObjects.Sprite;
+    
+    switch (resource.type) {
+      case ResourceType.GOLD:
+        sprite = this.add.sprite(resource.x, resource.y, 'gold');
+        break;
+      case ResourceType.WOOD:
+        sprite = this.add.sprite(resource.x, resource.y, 'wood');
+        break;
+      case ResourceType.STONE:
+        sprite = this.add.sprite(resource.x, resource.y, 'stone');
+        break;
+      default:
+        console.warn(`Type de ressource inconnu: ${resource.type}`);
+        return;
+    }
+    
+    sprite.setDepth(5);
+    this.resourceSprites.set(resource.id, sprite);
+  }
+
+  // Nouvelle méthode pour optimiser le rendu
+  private optimizeRendering() {
+    if (!this.player || !this.cameras.main) return;
+
+    // Calculer la zone visible à l'écran avec une marge
+    const camera = this.cameras.main;
+    const margin = 100; // Marge en pixels pour éviter les pop-ins
+    
+    this.visibleScreenRect.setTo(
+      camera.scrollX - margin,
+      camera.scrollY - margin,
+      camera.width + margin * 2,
+      camera.height + margin * 2
+    );
+
+    // Optimiser les ressources (activer/désactiver selon visibilité)
+    this.resourceSprites.forEach((sprite, id) => {
+      const isVisible = this.visibleScreenRect.contains(sprite.x, sprite.y);
+      sprite.setVisible(isVisible);
+      // Ne pas mettre à jour les sprites non visibles
+      sprite.setActive(isVisible);
+    });
+
+    // Optimiser les autres joueurs
+    this.unitSprites.forEach((data) => {
+      const isVisible = this.visibleScreenRect.contains(data.sprite.x, data.sprite.y);
+      data.sprite.setVisible(isVisible);
+      // Ne pas mettre à jour les sprites non visibles
+      data.sprite.setActive(isVisible);
+      
+      // Optimiser aussi le texte du nom
+      if (data.nameText) {
+        data.nameText.setVisible(isVisible);
+        data.nameText.setActive(isVisible);
+      }
+    });
+
+    // Optimiser les bâtiments
+    this.buildingSprites.forEach((sprite) => {
+      const isVisible = this.visibleScreenRect.contains(sprite.x, sprite.y);
+      sprite.setVisible(isVisible);
+      sprite.setActive(isVisible);
+    });
   }
 } 

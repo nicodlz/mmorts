@@ -30,6 +30,15 @@ export class GameRoom extends Room<GameState> {
   private readonly SIMULATION_INTERVAL = 1000 / 30; // 30 fois par seconde
   private intervalId: NodeJS.Timeout | null = null;
   private mapLines: string[] = [];
+  private resourcesByChunk: Map<string, Set<string>> = new Map(); // Ressources par chunk
+  
+  // Ajouter des propriétés pour l'optimisation des broadcasts
+  private playerUpdateRates: Map<string, { 
+    lastFullUpdate: number,
+    lastPositionUpdate: number
+  }> = new Map();
+  private readonly NEARBY_UPDATE_RATE = 100; // 10 fois par seconde pour les objets proches
+  private readonly DISTANT_UPDATE_RATE = 500; // 2 fois par seconde pour les objets distants
 
   // Constantes pour les quantités de ressources par type
   private readonly RESOURCE_AMOUNTS: {[key: string]: number} = {
@@ -51,44 +60,32 @@ export class GameRoom extends Room<GameState> {
   };
 
   onCreate() {
-    // Initialiser l'état du jeu
+    console.log("GameRoom created!");
     this.setState(new GameState());
-
-    // Charger la carte
+    
+    // Charger la carte et générer les ressources
     this.loadMap();
-
+    this.generateWorld();
+    this.generateResources();
+    
+    // Créer la boucle de simulation
+    this.intervalId = setInterval(() => this.update(), this.SIMULATION_INTERVAL);
+    
     // Configurer les gestionnaires de messages
     this.onMessage("move", (client, data) => {
-      const player = this.state.players.get(client.sessionId);
-      if (player) {
-        player.x = data.x;
-        player.y = data.y;
-        
-        // Diffuser le mouvement à tous les autres clients
-        this.broadcast("playerMoved", {
-          sessionId: client.sessionId,
-          x: data.x,
-          y: data.y
-        }, { except: client });
+      // Vérifier que les données sont valides
+      if (data && typeof data.x === 'number' && typeof data.y === 'number') {
+        this.handlePlayerMovement(client, data.x, data.y);
       }
     });
-
+    
     this.onMessage("harvest", (client, data) => {
       this.handleHarvest(client, data);
     });
-
+    
     this.onMessage("build", (client, data) => {
       this.handleBuild(client, data);
     });
-
-    // Log de débogage pour les connexions
-    console.log("Room créée, en attente de joueurs...");
-    
-    // Démarrer la boucle de simulation
-    this.intervalId = setInterval(() => this.update(), this.SIMULATION_INTERVAL);
-    
-    // Générer le monde initial
-    this.generateWorld();
   }
 
   // Nouveau joueur rejoint la partie
@@ -132,14 +129,21 @@ export class GameRoom extends Room<GameState> {
       console.log(`- Joueur ${id}: ${p.name} à (${p.x}, ${p.y})`);
     });
     
-    // Annoncer aux autres clients qu'un nouveau joueur a rejoint
-    this.broadcast("playerJoined", { 
-      sessionId: client.sessionId,
-      name: player.name,
-      x: player.x,
-      y: player.y,
-      hue: player.hue
-    }, { except: client });
+    // Envoyer uniquement les ressources dans les chunks proches du joueur
+    const nearbyResources = this.getResourcesInRange(player.x, player.y);
+    const resourcesData = Array.from(nearbyResources).map(id => {
+      const resource = this.state.resources.get(id);
+      return {
+        id: resource?.id,
+        type: resource?.type,
+        x: resource?.x,
+        y: resource?.y,
+        amount: resource?.amount
+      };
+    });
+
+    // Envoyer les ressources initiales au client
+    client.send("initialResources", resourcesData);
   }
 
   // Joueur quitte la partie
@@ -167,9 +171,77 @@ export class GameRoom extends Room<GameState> {
 
   // Mise à jour du jeu (appelée à intervalle régulier)
   private update() {
-    // Mise à jour de l'IA et de la production
+    // Mettre à jour l'IA des unités
     this.updateAI();
+    
+    // Mettre à jour la production des bâtiments
     this.updateProduction();
+    
+    // Optimiser les broadcasts en fonction de la distance
+    this.optimizeBroadcasts();
+  }
+
+  // Nouvelle méthode pour optimiser les broadcasts
+  private optimizeBroadcasts() {
+    const now = Date.now();
+    
+    // Parcourir tous les joueurs
+    this.state.players.forEach((player, sessionId) => {
+      // Initialiser les données de mise à jour si nécessaires
+      if (!this.playerUpdateRates.has(sessionId)) {
+        this.playerUpdateRates.set(sessionId, {
+          lastFullUpdate: 0,
+          lastPositionUpdate: 0
+        });
+      }
+      
+      const updateData = this.playerUpdateRates.get(sessionId)!;
+      
+      // Parcourir les autres joueurs pour déterminer les fréquences de mise à jour
+      this.state.players.forEach((otherPlayer, otherSessionId) => {
+        if (sessionId === otherSessionId) return; // Ne pas traiter le joueur lui-même
+        
+        // Calculer la distance entre les joueurs
+        const distance = Math.sqrt(
+          Math.pow(player.x - otherPlayer.x, 2) + 
+          Math.pow(player.y - otherPlayer.y, 2)
+        );
+        
+        const client = this.clients.find(c => c.sessionId === sessionId);
+        if (!client) return;
+        
+        // Si le joueur est proche, mises à jour fréquentes
+        if (distance < TILE_SIZE * CHUNK_SIZE * 3) {
+          // Mettre à jour position seulement si le temps écoulé est suffisant
+          if (now - updateData.lastPositionUpdate > this.NEARBY_UPDATE_RATE) {
+            client.send("playerPosition", {
+              sessionId: otherSessionId,
+              x: otherPlayer.x,
+              y: otherPlayer.y
+            });
+            updateData.lastPositionUpdate = now;
+          }
+        } 
+        // Sinon, mises à jour moins fréquentes
+        else {
+          // Mettre à jour position seulement si le temps écoulé est suffisant
+          if (now - updateData.lastPositionUpdate > this.DISTANT_UPDATE_RATE) {
+            client.send("playerPosition", {
+              sessionId: otherSessionId,
+              x: otherPlayer.x,
+              y: otherPlayer.y
+            });
+            updateData.lastPositionUpdate = now;
+          }
+        }
+      });
+      
+      // Mise à jour complète moins fréquente pour les entités éloignées
+      if (now - updateData.lastFullUpdate > this.DISTANT_UPDATE_RATE) {
+        // Envoyer des mises à jour pour les ressources et bâtiments éloignés à un taux réduit
+        updateData.lastFullUpdate = now;
+      }
+    });
   }
 
   // Génération du monde initial
@@ -219,10 +291,40 @@ export class GameRoom extends Room<GameState> {
           resource.maxAmount = this.RESOURCE_AMOUNTS[resourceType];
           resource.respawnTime = this.RESOURCE_RESPAWN_TIMES[resourceType];
           
+          // Ajouter la ressource à l'état global
           this.state.resources.set(resource.id, resource);
+          
+          // Ajouter la ressource au chunk correspondant
+          const chunkX = Math.floor(x / CHUNK_SIZE);
+          const chunkY = Math.floor(y / CHUNK_SIZE);
+          const chunkKey = `${chunkX},${chunkY}`;
+          
+          if (!this.resourcesByChunk.has(chunkKey)) {
+            this.resourcesByChunk.set(chunkKey, new Set());
+          }
+          this.resourcesByChunk.get(chunkKey)?.add(resource.id);
         }
       }
     }
+  }
+
+  // Nouvelle méthode pour obtenir les ressources dans un rayon de chunks
+  private getResourcesInRange(centerX: number, centerY: number, range: number = 2): Set<string> {
+    const centerChunkX = Math.floor(centerX / (TILE_SIZE * CHUNK_SIZE));
+    const centerChunkY = Math.floor(centerY / (TILE_SIZE * CHUNK_SIZE));
+    const resources = new Set<string>();
+
+    for (let dy = -range; dy <= range; dy++) {
+      for (let dx = -range; dx <= range; dx++) {
+        const chunkKey = `${centerChunkX + dx},${centerChunkY + dy}`;
+        const chunkResources = this.resourcesByChunk.get(chunkKey);
+        if (chunkResources) {
+          chunkResources.forEach(resourceId => resources.add(resourceId));
+        }
+      }
+    }
+
+    return resources;
   }
 
   // Gestion de la récolte de ressources
@@ -360,5 +462,50 @@ export class GameRoom extends Room<GameState> {
       ];
       console.log("Utilisation de la carte par défaut");
     }
+  }
+
+  // Modifier handlePlayerMovement pour mettre à jour les ressources visibles
+  private handlePlayerMovement(client: Client, newX: number, newY: number) {
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    // Calculer les anciens et nouveaux chunks
+    const oldChunkX = Math.floor(player.x / (TILE_SIZE * CHUNK_SIZE));
+    const oldChunkY = Math.floor(player.y / (TILE_SIZE * CHUNK_SIZE));
+    const newChunkX = Math.floor(newX / (TILE_SIZE * CHUNK_SIZE));
+    const newChunkY = Math.floor(newY / (TILE_SIZE * CHUNK_SIZE));
+
+    // Si le joueur a changé de chunk
+    if (oldChunkX !== newChunkX || oldChunkY !== newChunkY) {
+      console.log(`Joueur ${client.sessionId} a changé de chunk: (${oldChunkX}, ${oldChunkY}) -> (${newChunkX}, ${newChunkY})`);
+      
+      const nearbyResources = this.getResourcesInRange(newX, newY);
+      console.log(`Envoi de ${nearbyResources.size} ressources au joueur ${client.sessionId}`);
+      
+      const resourcesData = Array.from(nearbyResources).map(id => {
+        const resource = this.state.resources.get(id);
+        return {
+          id: resource?.id,
+          type: resource?.type,
+          x: resource?.x,
+          y: resource?.y,
+          amount: resource?.amount
+        };
+      });
+
+      // Envoyer la mise à jour des ressources au client
+      client.send("updateVisibleResources", resourcesData);
+    }
+
+    // Mettre à jour la position du joueur
+    player.x = newX;
+    player.y = newY;
+    
+    // Diffuser le mouvement à tous les autres clients
+    this.broadcast("playerMoved", {
+      sessionId: client.sessionId,
+      x: newX,
+      y: newY
+    }, { except: client });
   }
 } 

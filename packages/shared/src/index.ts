@@ -44,6 +44,8 @@ export type Vector2 = {
 // Schémas Colyseus
 export class PlayerSchema extends Schema {
   @type("string") id: string = "";
+  @type("string") name: string = "";
+  @type("number") hue: number = 0;
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") rotation: number = 0;
@@ -92,14 +94,27 @@ export const TILE_SIZE = 32;
 export const CHUNK_SIZE = 16; // 16x16 tiles
 
 // Building Costs
-export const BUILDING_COSTS = {
-  [BuildingType.FORGE]: { wood: 20, stone: 20 },
-  [BuildingType.HOUSE]: { wood: 10, stone: 10 },
-  [BuildingType.FURNACE]: { stone: 30 },
-  [BuildingType.FACTORY]: { iron: 20, stone: 20 },
-  [BuildingType.TOWER]: { wood: 50, iron: 5 },
-  [BuildingType.BARRACKS]: { wood: 10, iron: 10 },
-  [BuildingType.TOWN_CENTER]: { stone: 30, wood: 30, gold: 30 },
-  [BuildingType.YARD]: { iron: 20 },
-  [BuildingType.CABIN]: { steel: 20 }
-}; 
+export interface BuildingCosts {
+  [key: string]: {
+    [resource: string]: number;
+  };
+}
+
+export const BUILDING_COSTS: BuildingCosts = {
+  [BuildingType.FORGE]: { [ResourceType.WOOD]: 20, [ResourceType.STONE]: 20 },
+  [BuildingType.HOUSE]: { [ResourceType.WOOD]: 10, [ResourceType.STONE]: 10 },
+  [BuildingType.FURNACE]: { [ResourceType.STONE]: 30 },
+  [BuildingType.FACTORY]: { [ResourceType.IRON]: 20, [ResourceType.STONE]: 20 },
+  [BuildingType.TOWER]: { [ResourceType.WOOD]: 50, [ResourceType.IRON]: 5 },
+  [BuildingType.BARRACKS]: { [ResourceType.WOOD]: 10, [ResourceType.IRON]: 10 },
+  [BuildingType.TOWN_CENTER]: { [ResourceType.STONE]: 30, [ResourceType.WOOD]: 30, [ResourceType.GOLD]: 30 },
+  [BuildingType.YARD]: { [ResourceType.IRON]: 20 },
+  [BuildingType.CABIN]: { [ResourceType.STEEL]: 20 }
+};
+
+export class GameState extends Schema {
+  @type({ map: PlayerSchema }) players = new MapSchema<PlayerSchema>();
+  @type({ map: UnitSchema }) units = new MapSchema<UnitSchema>();
+  @type({ map: BuildingSchema }) buildings = new MapSchema<BuildingSchema>();
+  @type({ map: ResourceSchema }) resources = new MapSchema<ResourceSchema>();
+} 

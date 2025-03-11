@@ -7,6 +7,13 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@colyseus/core':
+        specifier: ^0.16.10
+        version: 0.16.10(@colyseus/schema@1.0.46)
+      nanoid:
+        specifier: ^5.1.3
+        version: 5.1.3
     devDependencies:
       prettier:
         specifier: ^3.5.3
@@ -373,12 +380,24 @@ packages:
   '@colyseus/arena@0.14.25':
     resolution: {integrity: sha512-Xb6tB5NqbOXpkT1drCt07q68fcA39L5MO+99GBwlbokfVLX556FdHiToFDE8FpOMd1EvrsRGaZC442x+QhK2EQ==}
 
+  '@colyseus/clock@1.0.0':
+    resolution: {integrity: sha512-x1un5rFEgilVAA6ukSG8GFgtpX/hsmL5BtrPdxLx0dbPU7zwpTVXez2qoGza7YYS5QTvVD45gbHyX/KaaEWSZQ==}
+
   '@colyseus/core@0.14.36':
     resolution: {integrity: sha512-Gy1/3xQV6Fd/NmmmWD3Cgb1aC2w516GGmOELcrKAgEBP0LAEal19hz0DaQRVJuLkUCo/9j5OxqK0ZvED4925YQ==}
     engines: {node: '>= 14.x'}
 
+  '@colyseus/core@0.16.10':
+    resolution: {integrity: sha512-pS+0vX/iUsvPRMLxcxrmZTK0aR+Ou9sOBq3CIPdXezSTIX8Bqe0WMfFq/tuD35cFtSycabhh9VpkTTeVc0Vl5Q==}
+    engines: {node: '>= 18.x'}
+    peerDependencies:
+      '@colyseus/schema': ^3.0.0
+
   '@colyseus/greeting-banner@1.0.0':
     resolution: {integrity: sha512-B/gAslDjeIUdelpF/ILycRLVIwisgoNCw70MlzwntOrfYwZ5L6MA9SDd8hGG+ONN6Ic8MkziZpyo8UqApLXLfg==}
+
+  '@colyseus/greeting-banner@2.0.6':
+    resolution: {integrity: sha512-65nK7KnJn6g3ArtJqNfVX+Mx7xTlBka04kSwloLP7s24UpCEaK7bMGRLgkzfnysARzlVh1eV4jynBWZN82dYwQ==}
 
   '@colyseus/mongoose-driver@0.14.22':
     resolution: {integrity: sha512-Bqg+1XGHo4t3UUqBxSCDuvxzuuDBObxOWVBH0GjdFmXWzJgrkMgkDFH8YXjo9h/sXaPRJNzJRlXMCV1txbYadw==}
@@ -386,12 +405,18 @@ packages:
   '@colyseus/monitor@0.14.22':
     resolution: {integrity: sha512-bApRiJLzdPUK/6wPZFrXaxMnSCOf+TYCN1leRlrG8UcEj/l9oZKeUk5uGej+uAzTRO6fOruQsEgBKMnBwvBNUQ==}
 
+  '@colyseus/msgpackr@1.10.5':
+    resolution: {integrity: sha512-ZSWPpEEnSe/oMzifiLKkNdE5UR0B8STagWR1JcKV5qw6ISM/z8d7ArZgGstqBrrZAXAOIZDpvOyrTloiR9zRlg==}
+
   '@colyseus/redis-presence@0.14.22':
     resolution: {integrity: sha512-VBdvJccjcEop24elJtcTdknA/kfh8wvg2/a+xnsH9z38GwtjI9Tsa8ZcjubiTMBP0f3Ye+gw/7ocjBZ/yzKwhA==}
 
   '@colyseus/schema@1.0.46':
     resolution: {integrity: sha512-0cgirRomXDuDlppgJPXDLzsWw8/ZHwJEnndgzyX9hOCoFHJyFIyOYoKIV4eVPtKNQm6l6rGax1rE2LId4ujr4g==}
     hasBin: true
+
+  '@colyseus/timer@1.0.1':
+    resolution: {integrity: sha512-zsbmytTaSfqOYlnw0PXQCgwumXjn8eM/HMyMTVGjXlczsJ8DFl5OHaWAsJz7kIn92NTAONoIwLTwyVRvpJCVzA==}
 
   '@colyseus/ws-transport@0.14.21':
     resolution: {integrity: sha512-lQXqwp5MOAdFLOn6UCuSZh0hqFMRYjAkW0B0qCNqKjaGjhsupF+z6hdEX5erJpLmdMiL4wxipvYaYoG2KjxfwA==}
@@ -901,6 +926,36 @@ packages:
 
   '@jridgewell/trace-mapping@0.3.9':
     resolution: {integrity: sha512-3Belt6tdc8bPgAtbcmdtNJlirVoTmEb5e2gC94PnkwEW9jI6CAHUeoG85tjWP5WquqfavoMtMwiG4P926ZKKuQ==}
+
+  '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.3':
+    resolution: {integrity: sha512-QZHtlVgbAdy2zAqNA9Gu1UpIuI8Xvsd1v8ic6B2pZmeFnFcMWiPLfWXh7TVw4eGEZ/C9TH281KwhVoeQUKbyjw==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@msgpackr-extract/msgpackr-extract-darwin-x64@3.0.3':
+    resolution: {integrity: sha512-mdzd3AVzYKuUmiWOQ8GNhl64/IoFGol569zNRdkLReh6LRLHOXxU4U8eq0JwaD8iFHdVGqSy4IjFL4reoWCDFw==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@msgpackr-extract/msgpackr-extract-linux-arm64@3.0.3':
+    resolution: {integrity: sha512-YxQL+ax0XqBJDZiKimS2XQaf+2wDGVa1enVRGzEvLLVFeqa5kx2bWbtcSXgsxjQB7nRqqIGFIcLteF/sHeVtQg==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@msgpackr-extract/msgpackr-extract-linux-arm@3.0.3':
+    resolution: {integrity: sha512-fg0uy/dG/nZEXfYilKoRe7yALaNmHoYeIoJuJ7KJ+YyU2bvY8vPv27f7UKhGRpY6euFYqEVhxCFZgAUNQBM3nw==}
+    cpu: [arm]
+    os: [linux]
+
+  '@msgpackr-extract/msgpackr-extract-linux-x64@3.0.3':
+    resolution: {integrity: sha512-cvwNfbP07pKUfq1uH+S6KJ7dT9K8WOE4ZiAcsrSes+UY55E/0jLYc+vq+DO7jlmqRb5zAggExKm0H7O/CBaesg==}
+    cpu: [x64]
+    os: [linux]
+
+  '@msgpackr-extract/msgpackr-extract-win32-x64@3.0.3':
+    resolution: {integrity: sha512-x0fWaQtYp4E6sktbsdAqnehxDgEc/VwM7uLsRCYWaiGu0ykYdZPiS8zCWdnjHwyiumousxfBm4SO31eXqwEZhQ==}
+    cpu: [x64]
+    os: [win32]
 
   '@next/env@15.2.1':
     resolution: {integrity: sha512-JmY0qvnPuS2NCWOz2bbby3Pe0VzdAQ7XpEB6uLIHmtXNfAsAO0KLQLkuAoc42Bxbo3/jMC3dcn9cdf+piCcG2Q==}
@@ -2666,6 +2721,10 @@ packages:
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
 
+  msgpackr-extract@3.0.3:
+    resolution: {integrity: sha512-P0efT1C9jIdVRefqjzOQ9Xml57zpOXnIuS+csaB4MdZbTdmGDLo8XhzBG1N7aO11gKDDkJvBLULeFTo46wwreA==}
+    hasBin: true
+
   mute-stream@0.0.8:
     resolution: {integrity: sha512-nnbWWOkoWyUsTjKrhgD0dcz22mdkSnpYqbEjIm2nhwhuxlSkpywJmBo8h0ZqJdkp73mb90SssHkN4rsRaBAfAA==}
 
@@ -2682,6 +2741,11 @@ packages:
   nanoid@3.3.8:
     resolution: {integrity: sha512-WNLf5Sd8oZxOm+TzppcYk8gVOgP+l58xNy58D0nbUnOxOWRWvlcCV4kUF7ltmI6PsrLl/BgKEyS4mqsGChFN0w==}
     engines: {node: ^10 || ^12 || ^13.7 || ^14 || >=15.0.1}
+    hasBin: true
+
+  nanoid@5.1.3:
+    resolution: {integrity: sha512-zAbEOEr7u2CbxwoMRlz/pNSpRP0FdAU4pRaYunCdEezWohXFs+a0Xw7RfkKaezMsmSM1vttcLthJtwRnVtOfHQ==}
+    engines: {node: ^18 || >=20}
     hasBin: true
 
   natural-compare@1.4.0:
@@ -2724,6 +2788,10 @@ packages:
 
   no-case@2.3.2:
     resolution: {integrity: sha512-rmTZ9kz+f3rCvK2TD1Ue/oZlns7OGoIWP4fc3llxxRXlOkHKoWPPWJOfFYpITabSow43QJbRIoHQXtt10VldyQ==}
+
+  node-gyp-build-optional-packages@5.2.2:
+    resolution: {integrity: sha512-s+w+rBWnpTMwSFbaE0UXsRlg7hU4FjekKU4eyAih5T8nJuNZT1nNsskXpxmeqSK9UzkBl6UgRlnKc8hz8IEqOw==}
+    hasBin: true
 
   node-os-utils@1.3.7:
     resolution: {integrity: sha512-fvnX9tZbR7WfCG5BAy3yO/nCLyjVWD6MghEq0z5FDfN+ZXpLWNITBdbifxQkQ25ebr16G0N7eRWJisOcMEHG3Q==}
@@ -3898,6 +3966,8 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@colyseus/clock@1.0.0': {}
+
   '@colyseus/core@0.14.36':
     dependencies:
       '@colyseus/greeting-banner': 1.0.0
@@ -3911,7 +3981,20 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@colyseus/core@0.16.10(@colyseus/schema@1.0.46)':
+    dependencies:
+      '@colyseus/greeting-banner': 2.0.6
+      '@colyseus/msgpackr': 1.10.5
+      '@colyseus/schema': 1.0.46
+      '@colyseus/timer': 1.0.1
+      debug: 4.4.0
+      nanoid: 2.1.11
+    transitivePeerDependencies:
+      - supports-color
+
   '@colyseus/greeting-banner@1.0.0': {}
+
+  '@colyseus/greeting-banner@2.0.6': {}
 
   '@colyseus/mongoose-driver@0.14.22':
     dependencies:
@@ -3934,6 +4017,10 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  '@colyseus/msgpackr@1.10.5':
+    optionalDependencies:
+      msgpackr-extract: 3.0.3
+
   '@colyseus/redis-presence@0.14.22':
     dependencies:
       '@colyseus/core': 0.14.36
@@ -3942,6 +4029,10 @@ snapshots:
       - supports-color
 
   '@colyseus/schema@1.0.46': {}
+
+  '@colyseus/timer@1.0.1':
+    dependencies:
+      '@colyseus/clock': 1.0.0
 
   '@colyseus/ws-transport@0.14.21':
     dependencies:
@@ -4306,6 +4397,24 @@ snapshots:
     dependencies:
       '@jridgewell/resolve-uri': 3.1.2
       '@jridgewell/sourcemap-codec': 1.5.0
+
+  '@msgpackr-extract/msgpackr-extract-darwin-arm64@3.0.3':
+    optional: true
+
+  '@msgpackr-extract/msgpackr-extract-darwin-x64@3.0.3':
+    optional: true
+
+  '@msgpackr-extract/msgpackr-extract-linux-arm64@3.0.3':
+    optional: true
+
+  '@msgpackr-extract/msgpackr-extract-linux-arm@3.0.3':
+    optional: true
+
+  '@msgpackr-extract/msgpackr-extract-linux-x64@3.0.3':
+    optional: true
+
+  '@msgpackr-extract/msgpackr-extract-win32-x64@3.0.3':
+    optional: true
 
   '@next/env@15.2.1': {}
 
@@ -6394,6 +6503,18 @@ snapshots:
 
   ms@2.1.3: {}
 
+  msgpackr-extract@3.0.3:
+    dependencies:
+      node-gyp-build-optional-packages: 5.2.2
+    optionalDependencies:
+      '@msgpackr-extract/msgpackr-extract-darwin-arm64': 3.0.3
+      '@msgpackr-extract/msgpackr-extract-darwin-x64': 3.0.3
+      '@msgpackr-extract/msgpackr-extract-linux-arm': 3.0.3
+      '@msgpackr-extract/msgpackr-extract-linux-arm64': 3.0.3
+      '@msgpackr-extract/msgpackr-extract-linux-x64': 3.0.3
+      '@msgpackr-extract/msgpackr-extract-win32-x64': 3.0.3
+    optional: true
+
   mute-stream@0.0.8: {}
 
   mz@2.7.0:
@@ -6407,6 +6528,8 @@ snapshots:
   nanoid@2.1.11: {}
 
   nanoid@3.3.8: {}
+
+  nanoid@5.1.3: {}
 
   natural-compare@1.4.0: {}
 
@@ -6446,6 +6569,11 @@ snapshots:
   no-case@2.3.2:
     dependencies:
       lower-case: 1.1.4
+
+  node-gyp-build-optional-packages@5.2.2:
+    dependencies:
+      detect-libc: 2.0.3
+    optional: true
 
   node-os-utils@1.3.7: {}
 
