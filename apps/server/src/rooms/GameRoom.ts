@@ -11,6 +11,8 @@ import {
   GameState as GameStateSchema
 } from "../schemas/GameState";
 
+import { BUILDING_COSTS, BuildingType } from "shared";
+
 // Schéma principal du jeu
 class GameState extends Schema {
   @type({ map: PlayerSchema })
@@ -34,6 +36,34 @@ export class GameRoom extends Room<GameState> {
   
   // Stocker les ressources en dehors de l'état pour éviter la synchronisation automatique
   private resources: Map<string, ResourceSchema> = new Map();
+  
+  // Système de production
+  private readonly PRODUCTION_RATES: { [key: string]: number } = {
+    [BuildingType.FURNACE]: 10000, // 10 secondes pour produire du charbon
+    [BuildingType.FORGE]: 8000,    // 8 secondes pour produire du fer
+    [BuildingType.FACTORY]: 30000  // 30 secondes pour produire de l'acier
+  };
+  
+  // Recettes pour les bâtiments de production
+  private readonly PRODUCTION_RECIPES: { 
+    [key: string]: { 
+      inputs: { [resource: string]: number },
+      outputs: { [resource: string]: number }
+    } 
+  } = {
+    [BuildingType.FURNACE]: {
+      inputs: { [ResourceType.WOOD]: 5 },
+      outputs: { [ResourceType.COAL]: 1 }
+    },
+    [BuildingType.FORGE]: {
+      inputs: { [ResourceType.STONE]: 5 },
+      outputs: { [ResourceType.IRON]: 1 }
+    },
+    [BuildingType.FACTORY]: {
+      inputs: { [ResourceType.COAL]: 3, [ResourceType.IRON]: 3 },
+      outputs: { [ResourceType.STEEL]: 1 }
+    }
+  };
   
   // Ajouter des propriétés pour l'optimisation des broadcasts
   private playerUpdateRates: Map<string, { 
@@ -91,6 +121,27 @@ export class GameRoom extends Room<GameState> {
     this.onMessage("build", (client, data) => {
       this.handleBuild(client, data);
     });
+
+    this.onMessage("destroyBuilding", (client, data) => {
+      // Vérifier que le client est le propriétaire du bâtiment ou a le droit de le détruire
+      const building = this.state.buildings.get(data.buildingId);
+      if (building && building.owner === client.sessionId) {
+        this.handleDestroyBuilding(data.buildingId);
+      } else {
+        console.log(`Le client ${client.sessionId} n'est pas autorisé à détruire le bâtiment ${data.buildingId}`);
+      }
+    });
+    
+    // Gestionnaire pour activer/désactiver la production d'un bâtiment
+    this.onMessage("toggleProduction", (client, data) => {
+      const { buildingId, active } = data;
+      const building = this.state.buildings.get(buildingId);
+      
+      if (building && building.owner === client.sessionId) {
+        building.productionActive = active;
+        console.log(`Production ${active ? 'activée' : 'désactivée'} pour le bâtiment ${buildingId}`);
+      }
+    });
   }
 
   // Nouveau joueur rejoint la partie
@@ -125,6 +176,20 @@ export class GameRoom extends Room<GameState> {
       player.hue = Math.floor(Math.random() * 360);
       console.log(`Aucune teinte reçue, génération aléatoire: ${player.hue}`);
     }
+
+    // Initialiser les ressources du joueur
+    player.resources = new MapSchema<number>();
+    player.resources.set(ResourceType.WOOD, 500);
+    player.resources.set(ResourceType.STONE, 500);
+    player.resources.set(ResourceType.GOLD, 500);
+    player.resources.set(ResourceType.IRON, 500);
+    player.resources.set(ResourceType.COAL, 500);
+    player.resources.set(ResourceType.STEEL, 500);
+    
+    // Définir la population initiale à 1 au lieu de 0
+    player.population = 1;
+    // Définir la population maximale à 0 (sera augmentée lors de la construction de maisons)
+    player.maxPopulation = 0;
     
     console.log(`Joueur créé: ${player.name} (${player.x}, ${player.y}), hue: ${player.hue}`);
     
@@ -179,16 +244,113 @@ export class GameRoom extends Room<GameState> {
     }
   }
 
-  // Mise à jour du jeu (appelée à intervalle régulier)
+  // Méthode appelée à chaque tick de simulation
   private update() {
-    // Mettre à jour l'IA des unités
-    this.updateAI();
+    // Vérifier si la Room existe encore
+    if (!this.state) return;
     
-    // Mettre à jour la production des bâtiments
+    // Gérer la production des bâtiments
     this.updateProduction();
     
-    // Optimiser les broadcasts en fonction de la distance
+    // Envoyer uniquement les mises à jour aux joueurs qui ont besoin de les voir
     this.optimizeBroadcasts();
+  }
+
+  // Méthode pour gérer la production des bâtiments
+  private updateProduction() {
+    // Parcourir tous les bâtiments
+    for (const [buildingId, building] of this.state.buildings.entries()) {
+      // Vérifier si c'est un bâtiment de production
+      if (this.PRODUCTION_RATES[building.type] && building.productionActive) {
+        const player = this.state.players.get(building.owner);
+        if (!player) continue;
+        
+        // Incrémenter la progression de la production, mais limiter les mises à jour
+        const increment = (this.SIMULATION_INTERVAL / this.PRODUCTION_RATES[building.type]) * 100;
+        const newProgress = building.productionProgress + increment;
+        
+        // Ne mettre à jour que si le changement est significatif (au moins 1%)
+        // Cette approche réduit considérablement le nombre de mises à jour réseau
+        if (Math.floor(newProgress) > Math.floor(building.productionProgress)) {
+          building.productionProgress = newProgress;
+        } else {
+          // Mettre à jour localement sans déclencher d'événement réseau
+          building["_productionProgress"] = newProgress;
+          
+          // Si on franchit un seuil, synchroniser avec la valeur réelle
+          if (Math.floor(building["_productionProgress"]) > Math.floor(building.productionProgress)) {
+            building.productionProgress = building["_productionProgress"];
+          }
+        }
+        
+        // Si la production est terminée (100%)
+        if (building.productionProgress >= 100) {
+          // Réinitialiser la progression
+          building.productionProgress = 0;
+          if (building["_productionProgress"]) building["_productionProgress"] = 0;
+          
+          // Obtenir la recette pour ce type de bâtiment
+          const recipe = this.PRODUCTION_RECIPES[building.type];
+          if (!recipe) continue;
+          
+          // Vérifier si le joueur a les ressources nécessaires
+          let hasAllInputs = true;
+          for (const [resource, amount] of Object.entries(recipe.inputs)) {
+            const playerResource = player.resources.get(resource) || 0;
+            if (playerResource < amount) {
+              hasAllInputs = false;
+              console.log(`Production impossible: ressources insuffisantes pour ${building.type} (${resource}: ${playerResource}/${amount})`);
+              break;
+            }
+          }
+          
+          // Si le joueur a toutes les ressources nécessaires
+          if (hasAllInputs) {
+            // Déduire les ressources d'entrée
+            for (const [resource, amount] of Object.entries(recipe.inputs)) {
+              const currentAmount = player.resources.get(resource) || 0;
+              player.resources.set(resource, currentAmount - amount);
+            }
+            
+            // Ajouter les ressources produites
+            for (const [resource, amount] of Object.entries(recipe.outputs)) {
+              const currentAmount = player.resources.get(resource) || 0;
+              player.resources.set(resource, currentAmount + amount);
+            }
+            
+            // Log détaillé pour le débogage
+            console.log(`PRODUCTION RÉUSSIE: Bâtiment ${building.type} (${buildingId}) a produit pour ${building.owner}`);
+            console.log(`  Entrées:`, recipe.inputs);
+            console.log(`  Sorties:`, recipe.outputs);
+            
+            // Notifier le client de la production avec un délai pour éviter les conditions de course
+            setTimeout(() => {
+              const client = this.clients.find(c => c.sessionId === building.owner);
+              if (client) {
+                client.send("resourceProduced", {
+                  buildingId,
+                  inputs: recipe.inputs,
+                  outputs: recipe.outputs
+                });
+                console.log(`Notification de production envoyée à ${building.owner}`);
+              }
+            }, 50);
+          } else {
+            console.log(`Production échouée pour ${building.type} (${buildingId}): ressources insuffisantes`);
+            
+            // Notifier le client de l'échec (optionnel)
+            const client = this.clients.find(c => c.sessionId === building.owner);
+            if (client) {
+              client.send("productionFailed", {
+                buildingId,
+                reason: "resources_insufficient",
+                requiredResources: recipe.inputs
+              });
+            }
+          }
+        }
+      }
+    }
   }
 
   // Nouvelle méthode pour optimiser les broadcasts
@@ -443,8 +605,95 @@ export class GameRoom extends Room<GameState> {
 
   // Gestion de la construction
   private handleBuild(client: Client, data: any) {
-    // Implémenter la construction ici
-    console.log(`${client.sessionId} tente de construire à (${data.x}, ${data.y})`);
+    const player = this.state.players.get(client.sessionId);
+    if (!player) return;
+
+    const { type, x, y } = data;
+    if (!type || x === undefined || y === undefined) return;
+
+    // Vérifier la distance avec le joueur
+    const playerTileX = Math.floor(player.x / TILE_SIZE);
+    const playerTileY = Math.floor(player.y / TILE_SIZE);
+    const buildingTileX = Math.floor(x / TILE_SIZE);
+    const buildingTileY = Math.floor(y / TILE_SIZE);
+    
+    const distance = Math.max(
+      Math.abs(playerTileX - buildingTileX),
+      Math.abs(playerTileY - buildingTileY)
+    );
+
+    if (distance > 2) {
+      console.log(`Construction trop loin pour le joueur ${client.sessionId}`);
+      return;
+    }
+
+    // Vérifier si l'emplacement est libre
+    for (const [_, building] of this.state.buildings.entries()) {
+      if (Math.floor(building.x / TILE_SIZE) === buildingTileX && 
+          Math.floor(building.y / TILE_SIZE) === buildingTileY) {
+        console.log(`Emplacement déjà occupé en (${buildingTileX}, ${buildingTileY})`);
+        return;
+      }
+    }
+
+    // Vérifier et déduire les ressources
+    const costs = BUILDING_COSTS[type];
+    if (!costs) {
+      console.log(`Type de bâtiment invalide: ${type}`);
+      return;
+    }
+
+    // Vérifier que le joueur a assez de ressources
+    for (const [resource, amount] of Object.entries(costs)) {
+      const playerResource = player.resources.get(resource) || 0;
+      if (playerResource < amount) {
+        console.log(`Ressources insuffisantes pour ${type}: manque de ${resource}`);
+        return;
+      }
+    }
+
+    // Déduire les ressources
+    for (const [resource, amount] of Object.entries(costs)) {
+      const currentAmount = player.resources.get(resource) || 0;
+      player.resources.set(resource, currentAmount - amount);
+    }
+
+    // Créer le bâtiment
+    const building = new BuildingSchema();
+    building.id = `${type}_${Date.now()}_${client.sessionId}`;
+    building.type = type;
+    building.owner = client.sessionId;
+    building.x = x;
+    building.y = y;
+    
+    // Initialiser les propriétés de production pour les bâtiments de production
+    if (this.PRODUCTION_RATES[type]) {
+      building.productionProgress = 0;
+      building.productionActive = true;
+      console.log(`Bâtiment de production ${type} créé avec production active`);
+    }
+    
+    // Définir la propriété fullTileCollision à true pour les murs
+    if (type === BuildingType.PLAYER_WALL) {
+      building.fullTileCollision = true;
+    }
+    
+    // Ajouter le bâtiment à l'état du jeu
+    this.state.buildings.set(building.id, building);
+
+    // Appliquer les effets spécifiques au type de bâtiment
+    if (type === BuildingType.HOUSE) {
+      // Augmenter la population maximale du joueur de 10
+      player.maxPopulation = (player.maxPopulation || 0) + 10;
+      
+      // Informer le client que sa population maximale a été mise à jour
+      this.clients.find(c => c.sessionId === client.sessionId)?.send('populationUpdate', {
+        population: player.population,
+        maxPopulation: player.maxPopulation
+      });
+    }
+
+    console.log(`Bâtiment ${type} construit par ${client.sessionId} en (${x}, ${y})`);
   }
 
   // Mise à jour de l'IA
@@ -452,9 +701,68 @@ export class GameRoom extends Room<GameState> {
     // Mettre à jour l'IA ici
   }
 
-  // Mise à jour de la production
-  private updateProduction() {
-    // Mettre à jour la production ici
+  // Méthode pour gérer la destruction d'un bâtiment
+  private handleDestroyBuilding(buildingId: string) {
+    const building = this.state.buildings.get(buildingId);
+    if (!building) return;
+
+    console.log(`Destruction du bâtiment ${building.type} (${buildingId})`);
+    
+    const player = this.state.players.get(building.owner);
+    if (!player) {
+      this.state.buildings.delete(buildingId);
+      return;
+    }
+    
+    // Rembourser 75% des ressources utilisées pour la construction
+    const costs = BUILDING_COSTS[building.type];
+    if (costs) {
+      // Calculer le remboursement pour chaque ressource
+      const refunds: {[key: string]: number} = {};
+      
+      for (const [resource, amount] of Object.entries(costs)) {
+        // Arrondir à l'entier inférieur
+        const refundAmount = Math.floor(amount * 0.75);
+        if (refundAmount > 0) {
+          // Mettre à jour les ressources du joueur
+          const currentAmount = player.resources.get(resource) || 0;
+          player.resources.set(resource, currentAmount + refundAmount);
+          
+          // Enregistrer pour le message de log
+          refunds[resource] = refundAmount;
+        }
+      }
+      
+      // Informer le client des ressources récupérées
+      this.clients.find(c => c.sessionId === building.owner)?.send('resourcesRefunded', {
+        buildingType: building.type,
+        refunds
+      });
+      
+      console.log(`Joueur ${building.owner} a récupéré des ressources:`, refunds);
+    }
+    
+    // Si c'est une maison, réduire la population maximale du joueur
+    if (building.type === BuildingType.HOUSE) {
+      // Réduire la population maximale de 10
+      player.maxPopulation = Math.max(0, (player.maxPopulation || 0) - 10);
+      
+      // Si la population actuelle dépasse la nouvelle limite, l'ajuster
+      if (player.population > player.maxPopulation) {
+        player.population = player.maxPopulation;
+      }
+      
+      // Informer le client que sa population maximale a été mise à jour
+      this.clients.find(c => c.sessionId === building.owner)?.send('populationUpdate', {
+        population: player.population,
+        maxPopulation: player.maxPopulation
+      });
+      
+      console.log(`Population maximale de ${building.owner} réduite à ${player.maxPopulation}`);
+    }
+    
+    // Supprimer le bâtiment de l'état du jeu
+    this.state.buildings.delete(buildingId);
   }
 
   // Méthode pour charger la carte

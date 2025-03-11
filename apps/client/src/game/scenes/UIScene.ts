@@ -4,11 +4,12 @@ import { ResourceType, BuildingType, TILE_SIZE } from 'shared';
 export class UIScene extends Phaser.Scene {
   // Éléments UI
   private resourceTexts: Map<string, Phaser.GameObjects.Text> = new Map();
-  private buildMenu: Phaser.GameObjects.Container;
+  private buildMenu?: Phaser.GameObjects.Container;
   private healthBar: Phaser.GameObjects.Graphics;
   private minimap: Phaser.GameObjects.Graphics;
   private minimapDiscoveredAreas: Phaser.GameObjects.Graphics;
   private fpsText: Phaser.GameObjects.Text;
+  private populationText: Phaser.GameObjects.Text;
   
   // Pour la minimap
   private minimapMemory: Map<string, {color: number, type: string}> = new Map();
@@ -26,11 +27,54 @@ export class UIScene extends Phaser.Scene {
   // Référence à la scène de jeu
   private gameScene: Phaser.Scene;
   
+  // Constantes de profondeur pour l'UI
+  private static readonly DEPTHS = {
+    BACKGROUND: 90,
+    RESOURCES_UI: 91,
+    BUILD_MENU: 92,
+    MINIMAP: 93,
+    FPS_COUNTER: 94
+  };
+  
+  // Ajouter ces propriétés
+  private selectedBuildingIndex: number = -1;
+  private selectedOverlay?: Phaser.GameObjects.Graphics;
+  
+  private static readonly BUILDING_SPRITES = {
+    [BuildingType.FORGE]: 'forge',
+    [BuildingType.HOUSE]: 'house',
+    [BuildingType.FURNACE]: 'furnace',
+    [BuildingType.FACTORY]: 'factory',
+    [BuildingType.TOWER]: 'tower',
+    [BuildingType.BARRACKS]: 'barracks',
+    [BuildingType.TOWN_CENTER]: 'tc',
+    [BuildingType.YARD]: 'quarry',
+    [BuildingType.CABIN]: 'hut',
+    [BuildingType.PLAYER_WALL]: 'playerwall'
+  };
+  
   constructor() {
     super({ key: 'UIScene' });
   }
   
+  preload() {
+    // Charger les sprites des bâtiments
+    this.load.image('forge', '/sprites/forge.png');
+    this.load.image('house', '/sprites/house.png');
+    this.load.image('furnace', '/sprites/furnace.png');
+    this.load.image('factory', '/sprites/factory.png');
+    this.load.image('tower', '/sprites/tower.png');
+    this.load.image('barracks', '/sprites/barracks.png');
+    this.load.image('tc', '/sprites/tc.png');
+    this.load.image('quarry', '/sprites/quarry.png');
+    this.load.image('hut', '/sprites/hut.png');
+    this.load.image('playerwall', '/sprites/playerWall.png');
+  }
+  
   create() {
+    // Nettoyer tous les anciens éléments d'UI au démarrage
+    this.cleanupAllUI();
+
     // Référence à la scène de jeu
     this.gameScene = this.scene.get('GameScene');
     
@@ -52,6 +96,9 @@ export class UIScene extends Phaser.Scene {
     // Créer l'affichage des FPS
     this.createFpsCounter();
     
+    // Créer l'indicateur de population
+    this.createPopulationDisplay();
+    
     // Configurer la touche M pour ouvrir/fermer la carte (au lieu de F)
     if (this.input.keyboard) {
       this.mKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.M);
@@ -60,6 +107,7 @@ export class UIScene extends Phaser.Scene {
     
     // Écouter les événements de la scène de jeu
     this.gameScene.events.on('updateResources', this.updateResourceDisplay, this);
+    this.gameScene.events.on('updatePopulation', this.updatePopulationDisplay, this);
     
     // Écouter les événements pour mettre à jour la minimap
     this.gameScene.events.on('updatePlayerPosition', this.updateMinimap, this);
@@ -67,6 +115,15 @@ export class UIScene extends Phaser.Scene {
     
     // Écouter pour le menu de construction
     this.events.on('toggleBuildMenu', this.toggleBuildMenu, this);
+
+    // Ajouter l'écouteur pour la molette
+    this.input.on('wheel', (pointer: Phaser.Input.Pointer, gameObjects: any, deltaX: number, deltaY: number) => {
+      if (this.buildMenu?.visible) {
+        // Déterminer la direction (haut = -1, bas = 1)
+        const direction = deltaY > 0 ? 1 : -1;
+        this.cycleBuildingSelection(direction);
+      }
+    });
   }
   
   update(time: number, delta: number) {
@@ -75,6 +132,9 @@ export class UIScene extends Phaser.Scene {
     
     // Mettre à jour l'affichage des FPS
     this.updateFpsCounter();
+    
+    // Mettre à jour la population
+    this.updatePopulationDisplay();
   }
   
   // Affichage des ressources
@@ -182,13 +242,14 @@ export class UIScene extends Phaser.Scene {
     const labelX = x + width - labelWidth; // Aligner à droite
     const labelY = y - labelHeight - 5; // 5px de marge
     
+    // Panneau pour le bouton M (Map)
     const mapLabel = this.add.graphics();
     mapLabel.fillStyle(0x000000, 0.7);
     mapLabel.fillRect(labelX, labelY, labelWidth, labelHeight);
     mapLabel.lineStyle(1, 0x444444);
     mapLabel.strokeRect(labelX, labelY, labelWidth, labelHeight);
     
-    // Créer un rectangle interactif plus simple
+    // Créer un rectangle interactif pour M
     const mapLabelButton = this.add.rectangle(
       labelX + labelWidth/2, 
       labelY + labelHeight/2, 
@@ -202,8 +263,37 @@ export class UIScene extends Phaser.Scene {
     // Pour le debug - rendre visible le rectangle (à supprimer en production)
     mapLabelButton.setFillStyle(0, 0); // Transparent
     
-    // Texte pour le panneau
+    // Texte pour le panneau M
     const labelText = this.add.text(labelX + labelWidth/2, labelY + labelHeight/2, "🗺️ M", {
+      fontSize: '16px',
+      color: '#FFFFFF',
+      align: 'center'
+    }).setOrigin(0.5);
+    
+    // Panneau pour le bouton B (Build)
+    const buildLabelX = labelX - labelWidth - 5; // 5px de marge entre les boutons
+    const buildLabel = this.add.graphics();
+    buildLabel.fillStyle(0x000000, 0.7);
+    buildLabel.fillRect(buildLabelX, labelY, labelWidth, labelHeight);
+    buildLabel.lineStyle(1, 0x444444);
+    buildLabel.strokeRect(buildLabelX, labelY, labelWidth, labelHeight);
+    
+    // Créer un rectangle interactif pour B
+    const buildLabelButton = this.add.rectangle(
+      buildLabelX + labelWidth/2, 
+      labelY + labelHeight/2, 
+      labelWidth, 
+      labelHeight
+    ).setInteractive({ useHandCursor: true })
+     .on('pointerdown', () => {
+       this.toggleBuildMenu();
+     });
+    
+    // Pour le debug - rendre visible le rectangle (à supprimer en production)
+    buildLabelButton.setFillStyle(0, 0); // Transparent
+    
+    // Texte pour le panneau B
+    const buildLabelText = this.add.text(buildLabelX + labelWidth/2, labelY + labelHeight/2, "🔨 B", {
       fontSize: '16px',
       color: '#FFFFFF',
       align: 'center'
@@ -222,6 +312,7 @@ export class UIScene extends Phaser.Scene {
       const newY = this.cameras.main.height - height - 10;
       const newLabelX = newX + width - labelWidth;
       const newLabelY = newY - labelHeight - 5;
+      const newBuildLabelX = newLabelX - labelWidth - 5;
       
       // Mettre à jour le fond de la minimap
       this.minimap.clear();
@@ -230,16 +321,27 @@ export class UIScene extends Phaser.Scene {
       this.minimap.lineStyle(1, 0x444444);
       this.minimap.strokeRect(newX, newY, width, height);
       
-      // Mettre à jour le panneau indicateur
+      // Mettre à jour le panneau indicateur M
       mapLabel.clear();
       mapLabel.fillStyle(0x000000, 0.7);
       mapLabel.fillRect(newLabelX, newLabelY, labelWidth, labelHeight);
       mapLabel.lineStyle(1, 0x444444);
       mapLabel.strokeRect(newLabelX, newLabelY, labelWidth, labelHeight);
       
-      // Mettre à jour la position du bouton et du texte
+      // Mettre à jour la position du bouton M et du texte
       mapLabelButton.setPosition(newLabelX + labelWidth/2, newLabelY + labelHeight/2);
       labelText.setPosition(newLabelX + labelWidth/2, newLabelY + labelHeight/2);
+      
+      // Mettre à jour le panneau indicateur B
+      buildLabel.clear();
+      buildLabel.fillStyle(0x000000, 0.7);
+      buildLabel.fillRect(newBuildLabelX, newLabelY, labelWidth, labelHeight);
+      buildLabel.lineStyle(1, 0x444444);
+      buildLabel.strokeRect(newBuildLabelX, newLabelY, labelWidth, labelHeight);
+      
+      // Mettre à jour la position du bouton B et du texte
+      buildLabelButton.setPosition(newBuildLabelX + labelWidth/2, newLabelY + labelHeight/2);
+      buildLabelText.setPosition(newBuildLabelX + labelWidth/2, newLabelY + labelHeight/2);
       
       this.updateMinimap();
     });
@@ -646,87 +748,269 @@ export class UIScene extends Phaser.Scene {
   
   // Menu de construction
   private createBuildMenu() {
-    const width = 400;
-    const height = 300;
-    const x = (this.cameras.main.width - width) / 2;
-    const y = (this.cameras.main.height - height) / 2;
+    // Nettoyer l'ancien menu s'il existe
+    if (this.buildMenu) {
+      this.buildMenu.destroy();
+    }
+
+    const padding = 15;
+    const itemSize = 96; // Taille de chaque case
+    const itemsPerRow = 10; // Tous les bâtiments sur une ligne (maintenant 10 avec le mur)
+    const spacing = 10;
     
+    const totalWidth = (itemSize + spacing) * itemsPerRow - spacing;
+    const height = itemSize + padding * 2;
+    
+    // Positionner en bas au centre
+    const x = (this.cameras.main.width - totalWidth) / 2;
+    const y = this.cameras.main.height - height - padding;
+    
+    // Créer le nouveau conteneur
     this.buildMenu = this.add.container(x, y);
+    this.buildMenu.setDepth(UIScene.DEPTHS.BUILD_MENU);
     
-    // Fond du menu
-    const background = this.add.graphics();
-    background.fillStyle(0x333333, 1);
-    background.fillRect(0, 0, width, height);
-    background.lineStyle(2, 0xffffff);
-    background.strokeRect(0, 0, width, height);
-    
-    // Titre
-    const title = this.add.text(width/2, 20, 'Construction', { 
-      fontSize: '24px', 
-      color: '#ffffff' 
-    }).setOrigin(0.5);
-    
-    // Boutons pour chaque bâtiment
+    // Liste des bâtiments avec leurs infos (nouvel ordre)
     const buildings = [
-      { type: BuildingType.FORGE, name: 'Forge', cost: 'Bois: 20, Pierre: 20' },
-      { type: BuildingType.HOUSE, name: 'Maison', cost: 'Bois: 10, Pierre: 10' },
-      { type: BuildingType.FURNACE, name: 'Four', cost: 'Pierre: 30' },
-      { type: BuildingType.FACTORY, name: 'Usine', cost: 'Fer: 20, Pierre: 20' },
-      { type: BuildingType.BARRACKS, name: 'Caserne', cost: 'Bois: 10, Fer: 10' }
+      { type: BuildingType.HOUSE, name: 'House', sprite: 'house', cost: { wood: 10, stone: 10 } },
+      { type: BuildingType.FORGE, name: 'Forge', sprite: 'forge', cost: { wood: 20, stone: 20 } },
+      { type: BuildingType.BARRACKS, name: 'Barracks', sprite: 'barracks', cost: { wood: 10, iron: 10 } },
+      { type: BuildingType.FURNACE, name: 'Furnace', sprite: 'furnace', cost: { stone: 30 } },
+      { type: BuildingType.FACTORY, name: 'Factory', sprite: 'factory', cost: { iron: 20, stone: 20 } },
+      { type: BuildingType.PLAYER_WALL, name: 'Wall', sprite: 'playerwall', cost: { stone: 10 } },
+      { type: BuildingType.TOWER, name: 'Tower', sprite: 'tower', cost: { wood: 50, iron: 5 } },
+      { type: BuildingType.TOWN_CENTER, name: 'Town Center', sprite: 'tc', cost: { stone: 30, wood: 30, gold: 30 } },
+      { type: BuildingType.YARD, name: 'Quarry', sprite: 'quarry', cost: { iron: 20 } },
+      { type: BuildingType.CABIN, name: 'Hut', sprite: 'hut', cost: { steel: 20 } }
     ];
     
     buildings.forEach((building, index) => {
-      const buttonY = 60 + index * 40;
+      const itemX = (itemSize + spacing) * index;
       
-      // Bouton
-      const button = this.add.rectangle(width/2, buttonY, 300, 30, 0x666666)
-        .setInteractive()
-        .on('pointerdown', () => {
-          this.selectBuilding(building.type);
-        })
+      // Fond de la case
+      const itemBackground = this.add.graphics();
+      itemBackground.fillStyle(0x333333, 1);
+      itemBackground.fillRect(itemX, padding, itemSize, itemSize);
+      itemBackground.lineStyle(1, 0x666666);
+      itemBackground.strokeRect(itemX, padding, itemSize, itemSize);
+      
+      // Zone interactive
+      const hitArea = new Phaser.Geom.Rectangle(itemX, padding, itemSize, itemSize);
+      const hitAreaGraphics = this.add.graphics();
+      hitAreaGraphics.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains)
         .on('pointerover', () => {
-          button.setFillStyle(0x888888);
+          itemBackground.clear();
+          itemBackground.fillStyle(0x444444, 1);
+          itemBackground.fillRect(itemX, padding, itemSize, itemSize);
+          itemBackground.lineStyle(1, 0x666666);
+          itemBackground.strokeRect(itemX, padding, itemSize, itemSize);
         })
         .on('pointerout', () => {
-          button.setFillStyle(0x666666);
+          itemBackground.clear();
+          itemBackground.fillStyle(0x333333, 1);
+          itemBackground.fillRect(itemX, padding, itemSize, itemSize);
+          itemBackground.lineStyle(1, 0x666666);
+          itemBackground.strokeRect(itemX, padding, itemSize, itemSize);
+        })
+        .on('pointerdown', () => {
+          if (this.buildMenu) {
+            this.selectedBuildingIndex = index;
+            this.selectBuilding(building.type);
+            this.updateSelectionOverlay();
+          }
         });
       
-      // Texte du bouton
-      const text = this.add.text(width/2, buttonY, `${building.name} (${building.cost})`, {
-        fontSize: '16px',
+      // Sprite du bâtiment
+      const sprite = this.add.sprite(itemX + itemSize/2, padding + itemSize/2 - 10, building.sprite);
+      sprite.setScale(1.5);
+      
+      // Nom du bâtiment
+      const name = this.add.text(itemX + itemSize/2, padding + itemSize - 25, building.name, {
+        fontSize: '12px',
         color: '#ffffff'
       }).setOrigin(0.5);
       
-      // Ajouter au conteneur
-      this.buildMenu.add([button, text]);
+      // Coût avec emojis
+      const costText = Object.entries(building.cost)
+        .map(([resource, amount]) => {
+          const emoji = resource === 'gold' ? '🪙' :
+                       resource === 'wood' ? '🌲' :
+                       resource === 'stone' ? '🪨' :
+                       resource === 'iron' ? '⚙️' :
+                       resource === 'coal' ? '⚫' :
+                       resource === 'steel' ? '🔧' : '❓';
+          return `${emoji}${amount}`;
+        })
+        .join(' ');
+      
+      const cost = this.add.text(itemX + itemSize/2, padding + itemSize - 10, costText, {
+        fontSize: '10px',
+        color: '#aaaaaa'
+      }).setOrigin(0.5);
+      
+      // Ajouter tous les éléments au conteneur
+      if (this.buildMenu) {
+        this.buildMenu.add([itemBackground, hitAreaGraphics, sprite, name, cost]);
+      }
     });
-    
-    // Bouton fermer
-    const closeButton = this.add.text(width - 20, 10, 'X', {
-      fontSize: '20px',
-      color: '#ffffff'
-    })
-    .setInteractive()
-    .on('pointerdown', () => {
-      this.toggleBuildMenu();
-    });
-    
-    // Ajouter tous les éléments au conteneur
-    this.buildMenu.add([background, title, closeButton]);
     
     // Cacher le menu par défaut
     this.buildMenu.setVisible(false);
+
+    // Ajouter un gestionnaire de redimensionnement
+    this.scale.on('resize', this.onResize, this);
   }
-  
+
+  private onResize() {
+    if (this.buildMenu) {
+      const padding = 15;
+      const itemSize = 96;
+      const itemsPerRow = 10;
+      const spacing = 10;
+      const totalWidth = (itemSize + spacing) * itemsPerRow - spacing;
+      const height = itemSize + padding * 2;
+      
+      const x = (this.cameras.main.width - totalWidth) / 2;
+      const y = this.cameras.main.height - height - padding;
+      
+      this.buildMenu.setPosition(x, y);
+    }
+  }
+
   private toggleBuildMenu() {
-    this.buildMenu.setVisible(!this.buildMenu.visible);
+    if (this.buildMenu) {
+      const newVisible = !this.buildMenu.visible;
+      this.buildMenu.setVisible(newVisible);
+      
+      // Réinitialiser la sélection quand on ferme le menu
+      if (!newVisible) {
+        this.selectedBuildingIndex = -1;
+        this.selectedOverlay?.destroy();
+        
+        // Notifier la GameScene pour arrêter le mode de placement du bâtiment
+        if (this.gameScene) {
+          this.gameScene.events.emit('stopPlacingBuilding');
+        }
+      }
+    }
+  }
+
+  private selectBuilding(buildingType: string) {
+    // Ne plus cacher le menu
+    // Informer la scène principale avec le type de bâtiment directement au lieu du nom du sprite
+    this.gameScene.events.emit('buildingSelected', buildingType);
+  }
+
+  private cycleBuildingSelection(direction: number) {
+    const buildings = [
+      BuildingType.HOUSE,
+      BuildingType.FORGE,
+      BuildingType.BARRACKS,
+      BuildingType.FURNACE,
+      BuildingType.FACTORY,
+      BuildingType.PLAYER_WALL,
+      BuildingType.TOWER,
+      BuildingType.TOWN_CENTER,
+      BuildingType.YARD,
+      BuildingType.CABIN
+    ];
+
+    // Mettre à jour l'index
+    if (this.selectedBuildingIndex === -1) {
+      this.selectedBuildingIndex = direction > 0 ? 0 : buildings.length - 1;
+    } else {
+      this.selectedBuildingIndex = (this.selectedBuildingIndex + direction + buildings.length) % buildings.length;
+    }
+
+    // Sélectionner le nouveau bâtiment
+    this.selectBuilding(buildings[this.selectedBuildingIndex]);
+    this.updateSelectionOverlay();
+  }
+
+  private updateSelectionOverlay() {
+    const padding = 15;
+    const itemSize = 96;
+    const spacing = 10;
+    const itemX = (itemSize + spacing) * this.selectedBuildingIndex;
+
+    // Supprimer l'ancien overlay s'il existe
+    this.selectedOverlay?.destroy();
+
+    // Créer le nouvel overlay
+    this.selectedOverlay = this.add.graphics();
+    this.selectedOverlay.lineStyle(3, 0xffff00);
+    this.selectedOverlay.strokeRect(itemX, padding, itemSize, itemSize);
+
+    // Ajouter l'overlay au conteneur du menu
+    if (this.buildMenu) {
+      this.buildMenu.add(this.selectedOverlay);
+    }
+  }
+
+  private cleanupAllUI() {
+    // Détruire tous les conteneurs existants
+    this.children.list.forEach(child => {
+      if (child instanceof Phaser.GameObjects.Container) {
+        child.destroy(true);
+      }
+    });
+
+    // Détruire tous les graphics existants
+    this.children.list.forEach(child => {
+      if (child instanceof Phaser.GameObjects.Graphics) {
+        child.destroy();
+      }
+    });
+
+    // Réinitialiser les références
+    this.buildMenu = undefined;
+    this.minimap?.destroy();
+    this.minimapDiscoveredAreas?.destroy();
+    this.fullMap?.destroy();
+    this.fullMapBackground?.destroy();
+    this.fullMapContent?.destroy();
+    this.resourceTexts.clear();
+  }
+
+  // Méthode pour créer l'indicateur de population
+  private createPopulationDisplay() {
+    const x = this.cameras.main.width - 100;
+    const y = 10;
+    
+    this.populationText = this.add.text(x, y, '👨‍👨‍👧‍👦 1/1', {
+      fontSize: '18px',
+      color: '#ffffff',
+      backgroundColor: '#00000080',
+      padding: { x: 5, y: 2 }
+    });
+    this.populationText.setScrollFactor(0);
+    this.populationText.setDepth(100);
+    
+    // Ajouter un événement de redimensionnement
+    this.scale.on('resize', () => {
+      const newX = this.cameras.main.width - 100;
+      this.populationText.setPosition(newX, y);
+    });
   }
   
-  private selectBuilding(buildingType: string) {
-    // Cacher le menu
-    this.buildMenu.setVisible(false);
+  // Méthode pour mettre à jour l'indicateur de population
+  private updatePopulationDisplay() {
+    if (!this.gameScene) return;
     
-    // Informer la scène principale
-    this.gameScene.events.emit('buildingSelected', buildingType);
+    const gameInstance = this.gameScene as any;
+    if (!gameInstance.playerEntity) return;
+    
+    const population = gameInstance.playerEntity.population || 1;
+    const maxPopulation = gameInstance.playerEntity.maxPopulation || 1;
+    
+    this.populationText.setText(`👨‍👨‍👧‍👦 ${population}/${maxPopulation}`);
+    
+    // Colorer le texte en fonction de l'occupation
+    if (population < maxPopulation * 0.7) {
+      this.populationText.setColor('#00ff00'); // Vert si peu peuplé
+    } else if (population < maxPopulation) {
+      this.populationText.setColor('#ffff00'); // Jaune si moyennement peuplé
+    } else {
+      this.populationText.setColor('#ff0000'); // Rouge si complètement peuplé
+    }
   }
 } 

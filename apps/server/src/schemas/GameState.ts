@@ -21,6 +21,8 @@ export class PlayerSchema extends Schema {
   @type("number") y: number = 0;
   @type("number") hue: number = 0;
   @type("string") name: string = "";
+  @type("number") population: number = 0;
+  @type("number") maxPopulation: number = 0;
   @type({ map: "number" }) resources = new MapSchema<number>();
 }
 
@@ -43,7 +45,11 @@ export class BuildingSchema extends Schema {
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") health: number = 100;
+  @type("number") maxHealth: number = 100;
+  @type("number") productionProgress: number = 0;
+  @type("boolean") productionActive: boolean = true;
   @type("number") progress: number = 0; // Pour les bâtiments en construction
+  @type("boolean") fullTileCollision: boolean = false; // Pour les bâtiments qui occupent toute la case
 }
 
 // Schéma pour une ressource

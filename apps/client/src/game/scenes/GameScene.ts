@@ -8,7 +8,8 @@ import {
   TILE_SIZE,
   CHUNK_SIZE,
   ResourceType,
-  BUILDING_COSTS
+  BUILDING_COSTS,
+  BuildingType
 } from 'shared';
 
 export class GameScene extends Phaser.Scene {
@@ -119,6 +120,29 @@ export class GameScene extends Phaser.Scene {
   // Ajouter cette propriété pour suivre si la position initiale a été définie
   private initialPositionSet: boolean = false;
   
+  // Mapping des types de bâtiments vers les noms de sprites
+  private static readonly BUILDING_SPRITES = {
+    [BuildingType.FORGE]: 'forge',
+    [BuildingType.HOUSE]: 'house',
+    [BuildingType.FURNACE]: 'furnace',
+    [BuildingType.FACTORY]: 'factory',
+    [BuildingType.TOWER]: 'tower',
+    [BuildingType.BARRACKS]: 'barracks',
+    [BuildingType.TOWN_CENTER]: 'tc',
+    [BuildingType.YARD]: 'quarry',
+    [BuildingType.CABIN]: 'hut',
+    [BuildingType.PLAYER_WALL]: 'playerwall'
+  };
+  
+  // Initialiser les variables pour la sélection de bâtiment
+  private selectedBuilding: string | null = null;
+  private destroyButton: Phaser.GameObjects.Text | null = null;
+  
+  // Variable pour suivre si un objet du jeu a été cliqué
+  private clickedOnGameObject: boolean = false;
+  
+  private lastProductionBarsUpdate: number = 0;
+  
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
@@ -151,15 +175,16 @@ export class GameScene extends Phaser.Scene {
     this.load.image('stone', 'sprites/stone2.png');
     
     // Charger les sprites des bâtiments
-    this.load.image('forge', 'sprites/buildings/forge.png');
-    this.load.image('house', 'sprites/buildings/house.png');
-    this.load.image('furnace', 'sprites/buildings/furnace.png');
-    this.load.image('factory', 'sprites/buildings/factory.png');
-    this.load.image('tower', 'sprites/buildings/tower.png');
-    this.load.image('barracks', 'sprites/buildings/barracks.png');
-    this.load.image('town_center', 'sprites/buildings/town_center.png');
-    this.load.image('yard', 'sprites/buildings/yard.png');
-    this.load.image('cabin', 'sprites/buildings/cabin.png');
+    this.load.image('forge', 'sprites/forge.png');
+    this.load.image('house', 'sprites/house.png');
+    this.load.image('furnace', 'sprites/furnace.png');
+    this.load.image('factory', 'sprites/factory.png');
+    this.load.image('tower', 'sprites/tower.png');
+    this.load.image('barracks', 'sprites/barracks.png');
+    this.load.image('town_center', 'sprites/tc.png');
+    this.load.image('yard', 'sprites/quarry.png');
+    this.load.image('cabin', 'sprites/hut.png');
+    this.load.image('player_wall', 'sprites/playerWall.png');
     
     // Charger les tuiles de terrain
     this.load.image('grass', 'sprites/grass.png');
@@ -214,12 +239,39 @@ export class GameScene extends Phaser.Scene {
     // B pour ouvrir le menu de construction
     this.bKey = this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.B);
     this.bKey.on('down', () => {
-      // À implémenter: ouvrir le menu de construction
-      this.events.emit('toggleBuildMenu');
+      // Émettre l'événement sur la UIScene
+      const uiScene = this.scene.get('UIScene');
+      uiScene.events.emit('toggleBuildMenu');
+    });
+    
+    // Variable pour suivre si un objet du jeu a été cliqué
+    this.clickedOnGameObject = false;
+    
+    // Déselectionner le bâtiment quand on clique ailleurs
+    this.input.on('pointerdown', (pointer) => {
+      if (this.selectedBuilding && !this.clickedOnGameObject) {
+        this.selectBuilding(null);
+      }
+      
+      // Réinitialiser le flag pour le prochain clic
+      this.clickedOnGameObject = false;
+    });
+    
+    // Suivre les clics sur les objets de jeu pour éviter de déselectionner
+    this.input.on('gameobjectdown', () => {
+      this.clickedOnGameObject = true;
     });
     
     // Ajouter les événements de souris pour la collecte
-    this.input.on('pointerdown', this.handlePointerDown, this);
+    this.input.on('pointerdown', (pointer) => {
+      // Ne traiter que si on n'a pas cliqué sur un objet du jeu
+      if (!this.clickedOnGameObject) {
+        this.handlePointerDown(pointer);
+      }
+      // Réinitialiser pour le prochain clic
+      this.clickedOnGameObject = false;
+    }, this);
+    
     this.input.on('pointerup', this.handlePointerUp, this);
   }
   
@@ -362,10 +414,29 @@ export class GameScene extends Phaser.Scene {
 
     // Créer un groupe pour les effets numériques
     this.numericEffects = this.add.group();
-
+    
+    // Initialiser les gestionnaires de ressources
+    this.initializeResourceListeners();
+    
+    // S'assurer que les gestionnaires d'événements sont configurés correctement
+    this.setupNetworkHandlers();
+    
+    // Ajouter un log pour vérifier que tout est bien initialisé
+    console.log("GameScene créée avec succès");
+    console.log("État de la room:", this.room ? "Connecté" : "Non connecté");
+    console.log("Gestionnaires réseau configurés:", 
+      this.room && this.room.onMessage ? "Oui" : "Non");
+    
     // Écouter les événements de construction
     this.events.on('buildingSelected', (buildingType: string) => {
       this.startPlacingBuilding(buildingType);
+    });
+    
+    // Écouter l'événement d'arrêt de placement de bâtiment (quand le menu est fermé)
+    this.events.on('stopPlacingBuilding', () => {
+      if (this.isPlacingBuilding) {
+        this.stopPlacingBuilding();
+      }
     });
 
     // Ajouter les événements de la souris pour la construction
@@ -375,14 +446,11 @@ export class GameScene extends Phaser.Scene {
         const tileX = Math.floor(worldPoint.x / TILE_SIZE) * TILE_SIZE;
         const tileY = Math.floor(worldPoint.y / TILE_SIZE) * TILE_SIZE;
         
-        this.buildingPreview.setPosition(tileX + TILE_SIZE/2, tileY + TILE_SIZE/2);
-        
-        // Vérifier si on peut placer le bâtiment ici
-        this.canPlaceBuilding = this.checkCanPlaceBuilding(tileX, tileY);
-        this.buildingPreview.setTint(this.canPlaceBuilding ? 0xffffff : 0xff0000);
+        this.updateBuildingPreview(tileX, tileY);
       }
     });
 
+    // Modifié pour ne pas interférer avec la sélection des bâtiments
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (this.isPlacingBuilding && this.selectedBuildingType && this.canPlaceBuilding) {
         const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
@@ -407,6 +475,10 @@ export class GameScene extends Phaser.Scene {
         this.stopPlacingBuilding();
       }
     });
+    
+    // Initialiser les variables pour la sélection de bâtiment
+    this.selectedBuilding = null;
+    this.destroyButton = null;
   }
   
   update(time: number, delta: number) {
@@ -490,6 +562,18 @@ export class GameScene extends Phaser.Scene {
         y: this.actualY,
         resources: this.resourceSprites
       });
+    }
+    
+    // Mettre à jour les animations d'outils
+    this.updateToolAnimation(time, delta);
+    
+    // Mettre à jour le minage
+    this.updateMining(time);
+    
+    // Mettre à jour les barres de progression des bâtiments de production moins fréquemment
+    if (time - this.lastProductionBarsUpdate > 200) { // Toutes les 200ms au lieu de chaque frame
+      this.updateProductionBars();
+      this.lastProductionBarsUpdate = time;
     }
   }
   
@@ -836,16 +920,110 @@ export class GameScene extends Phaser.Scene {
       }
     };
 
-    // Écouter l'ajout de bâtiments
+    // Écouter les ajouts de bâtiments
     this.room.state.buildings.onAdd = (building: any, buildingId: string) => {
-      console.log(`Bâtiment ajouté: ${buildingId} (type: ${building.type}, position: ${building.x}, ${building.y})`);
+      console.log(`Bâtiment ajouté: ${buildingId}, type: ${building.type}`);
       
-      // Créer le sprite du bâtiment
-      const sprite = this.add.sprite(building.x, building.y, building.type.toLowerCase());
-      sprite.setDepth(8); // Au-dessus du sol mais en-dessous des joueurs
+      // Récupérer le type de bâtiment et créer le sprite correspondant
+      const buildingType = building.type.toLowerCase();
+      const spriteName = GameScene.BUILDING_SPRITES[building.type] || buildingType;
       
-      // Stocker la référence au sprite
+      const sprite = this.add.sprite(
+        building.x + TILE_SIZE/2,
+        building.y + TILE_SIZE/2,
+        spriteName
+      );
+      
+      // Stocker le sprite dans la Map
       this.buildingSprites.set(buildingId, sprite);
+      
+      // Définir la profondeur pour que le bâtiment apparaisse au-dessus des tuiles
+      sprite.setDepth(10);
+      
+      // Amélioration: s'assurer que le sprite est bien visible et interactif
+      sprite.setAlpha(1);
+      sprite.setScale(1);
+      
+      // Utiliser une zone d'interaction agrandie pour faciliter le clic
+      const hitArea = new Phaser.Geom.Rectangle(-TILE_SIZE/2 - 5, -TILE_SIZE/2 - 5, TILE_SIZE + 10, TILE_SIZE + 10);
+      sprite.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
+      
+      // Ajouter des événements de débogage
+      sprite.on('pointerover', () => {
+        console.log(`Survol du bâtiment: ${buildingId}`);
+        sprite.setTint(0xaaffaa);
+      });
+      
+      sprite.on('pointerout', () => {
+        console.log(`Fin de survol du bâtiment: ${buildingId}`);
+        if (this.selectedBuilding !== buildingId) {
+          sprite.setTint(0xffffff);
+        } else {
+          sprite.setTint(0x00ffff);
+        }
+      });
+      
+      sprite.on('pointerdown', () => {
+        console.log(`Clic sur le bâtiment: ${buildingId}`);
+        this.selectBuilding(buildingId);
+      });
+      
+      // Ajouter une barre de couleur pour indiquer le propriétaire
+      if (building.owner) {
+        console.log(`Propriétaire du bâtiment: ${building.owner}`);
+        
+        // Récupérer le joueur propriétaire
+        const owner = this.room.state.players.get(building.owner);
+        if (owner && owner.hue !== undefined) {
+          // Convertir la teinte en couleur
+          const ownerColor = this.hueToColor(owner.hue);
+          
+          // Créer une barre de couleur sous le bâtiment
+          const barWidth = TILE_SIZE * 0.8;
+          const barHeight = 4;
+          const bar = this.add.rectangle(
+            sprite.x,
+            sprite.y + TILE_SIZE/2 + 2,
+            barWidth,
+            barHeight,
+            ownerColor
+          );
+          bar.setDepth(11);
+          
+          // Stocker une référence à la barre de couleur
+          sprite.setData('ownerBar', bar);
+        }
+      }
+      
+      // Si c'est un bâtiment de production (four, forge ou usine), ajouter une barre de progression
+      if (building.type === BuildingType.FURNACE || building.type === BuildingType.FORGE || building.type === BuildingType.FACTORY) {
+        // Fond de la barre de progression (gris)
+        const progressBg = this.add.rectangle(
+          sprite.x,
+          sprite.y + TILE_SIZE/2 + 8, // Sous la barre du propriétaire
+          TILE_SIZE * 0.8,
+          5,
+          0x444444
+        );
+        progressBg.setAlpha(0.7);
+        progressBg.setDepth(11);
+        
+        // Barre de progression (verte)
+        const progressBar = this.add.rectangle(
+          sprite.x - (TILE_SIZE * 0.4), // Aligné à gauche
+          sprite.y + TILE_SIZE/2 + 8,
+          0, // La largeur sera mise à jour dynamiquement
+          5,
+          0x00ff00
+        );
+        progressBar.setOrigin(0, 0.5); // Origine à gauche pour l'animation
+        progressBar.setDepth(12);
+        
+        // Stocker des références aux barres pour les mises à jour
+        sprite.setData('progressBg', progressBg);
+        sprite.setData('progressBar', progressBar);
+        sprite.setData('isProductionBuilding', true);
+      }
     };
     
     // Écouter les modifications des bâtiments
@@ -856,7 +1034,7 @@ export class GameScene extends Phaser.Scene {
       
       // Mettre à jour la position si elle a changé
       if (building.x !== undefined && building.y !== undefined) {
-        buildingSprite.setPosition(building.x, building.y);
+        buildingSprite.setPosition(building.x + TILE_SIZE/2, building.y + TILE_SIZE/2);
       }
       
       // Mettre à jour d'autres propriétés si nécessaire (santé, état, etc.)
@@ -869,9 +1047,53 @@ export class GameScene extends Phaser.Scene {
     this.room.state.buildings.onRemove = (building: any, buildingId: string) => {
       console.log(`Bâtiment supprimé: ${buildingId}`);
       
+      // Si le bâtiment supprimé était sélectionné, le désélectionner
+      if (this.selectedBuilding === buildingId) {
+        this.selectBuilding("");
+      }
+      
       // Récupérer et supprimer le sprite
       const buildingSprite = this.buildingSprites.get(buildingId);
       if (buildingSprite) {
+        // Supprimer également la barre de couleur si elle existe
+        const ownerBar = buildingSprite.getData('ownerBar');
+        if (ownerBar) {
+          this.tweens.add({
+            targets: ownerBar,
+            alpha: 0,
+            duration: 400,
+            onComplete: () => {
+              ownerBar.destroy();
+            }
+          });
+        }
+        
+        // Supprimer les barres de progression si elles existent
+        const progressBg = buildingSprite.getData('progressBg');
+        const progressBar = buildingSprite.getData('progressBar');
+        
+        if (progressBg) {
+          this.tweens.add({
+            targets: progressBg,
+            alpha: 0,
+            duration: 400,
+            onComplete: () => {
+              progressBg.destroy();
+            }
+          });
+        }
+        
+        if (progressBar) {
+          this.tweens.add({
+            targets: progressBar,
+            alpha: 0,
+            duration: 400,
+            onComplete: () => {
+              progressBar.destroy();
+            }
+          });
+        }
+        
         // Ajouter une animation de destruction si nécessaire
         this.tweens.add({
           targets: buildingSprite,
@@ -888,65 +1110,135 @@ export class GameScene extends Phaser.Scene {
     };
 
     // Gestionnaire pour les ressources initiales
-    this.room.onMessage("initialResources", (resources: any[]) => {
-      console.log("Réception des ressources initiales:", resources.length);
+    this.room.onMessage("initialResources", (data) => {
+      console.log(`Ressources initiales reçues: ${data.length} ressources`);
       
-      // Supprimer toutes les ressources existantes
-      this.resourceSprites.forEach(sprite => sprite.destroy());
-      this.resourceSprites.clear();
-      this.visibleResources.clear();
+      // Ajouter chaque ressource
+      data.forEach((resourceData: any) => {
+        // Vérifier que les données sont valides
+        if (!resourceData.id || !resourceData.type || 
+            resourceData.x === undefined || resourceData.y === undefined) {
+          console.error("Données de ressource invalides:", resourceData);
+          return;
+        }
+        
+        // Ajouter la ressource à l'état local
+        this.room.state.resources.onAdd(resourceData, resourceData.id);
+      });
+    });
+    
+    // Gestionnaire pour les mises à jour de ressources visibles
+    this.room.onMessage("updateVisibleResources", (data) => {
+      console.log(`Mise à jour des ressources visibles: ${data.length} ressources`);
       
-      // Créer les sprites pour les nouvelles ressources
-      resources.forEach(resource => {
-        this.createResourceSprite(resource);
-        this.visibleResources.add(resource.id);
+      // Parcourir les ressources envoyées et ajouter celles qui n'existent pas encore
+      data.forEach((resourceData: any) => {
+        if (!resourceData.id) return;
+        
+        // Vérifier si la ressource existe déjà
+        if (!this.resourceSprites.has(resourceData.id)) {
+          // Ajouter la ressource à l'état local
+          this.room.state.resources.onAdd(resourceData, resourceData.id);
+        }
+      });
+    });
+    
+    // Gestionnaire pour les mises à jour de population
+    this.room.onMessage("populationUpdate", (data: { population: number, maxPopulation: number }) => {
+      console.log(`Mise à jour de la population: ${data.population}/${data.maxPopulation}`);
+      
+      // Mettre à jour les données du joueur
+      if (this.playerEntity) {
+        this.playerEntity.population = data.population;
+        this.playerEntity.maxPopulation = data.maxPopulation;
+      }
+      
+      // Émettre un événement pour mettre à jour l'UI
+      this.events.emit('updatePopulation', data);
+    });
+    
+    // Gestionnaire pour les ressources produites
+    this.room.onMessage("resourceProduced", (data: {
+      buildingId: string,
+      inputs: { [resource: string]: number },
+      outputs: { [resource: string]: number }
+    }) => {
+      console.log("PRODUCTION REÇUE:", data);
+      
+      // Mettre à jour les ressources dans l'interface
+      this.updateResourcesUI();
+      
+      // Trouver le bâtiment concerné
+      const buildingSprite = this.buildingSprites.get(data.buildingId);
+      if (!buildingSprite) {
+        console.error(`Sprite du bâtiment non trouvé pour l'ID: ${data.buildingId}`);
+        return;
+      }
+      
+      // Afficher des effets visuels pour chaque ressource produite
+      let offsetX = 0;
+      Object.entries(data.outputs).forEach(([resource, amount]) => {
+        console.log(`Affichage de l'effet +${amount} pour ${resource}`);
+        
+        // Créer un effet +X pour chaque ressource produite
+        this.showNumericEffect(`+${amount}`, buildingSprite.x + offsetX, buildingSprite.y - 20, resource);
+        offsetX += 15; // Décaler les effets pour éviter qu'ils se superposent
+      });
+      
+      // Effet visuel sur le bâtiment
+      this.tweens.add({
+        targets: buildingSprite,
+        scale: 1.1,
+        duration: 200,
+        yoyo: true,
+        ease: 'Power2',
+        onComplete: () => {
+          console.log("Animation de production terminée");
+        }
+      });
+    });
+    
+    // Gestionnaire pour les échecs de production
+    this.room.onMessage("productionFailed", (data: {
+      buildingId: string,
+      reason: string,
+      requiredResources: { [resource: string]: number }
+    }) => {
+      console.log("PRODUCTION ÉCHOUÉE:", data);
+      
+      // Trouver le bâtiment concerné
+      const buildingSprite = this.buildingSprites.get(data.buildingId);
+      if (!buildingSprite) return;
+      
+      // Effet visuel pour montrer l'échec (optionnel)
+      this.tweens.add({
+        targets: buildingSprite,
+        alpha: 0.5,
+        duration: 200,
+        yoyo: true,
+        ease: 'Power2'
       });
     });
 
-    // Gestionnaire pour les mises à jour des ressources visibles
-    this.room.onMessage("updateVisibleResources", (resources: any[]) => {
-      console.log(`=== Mise à jour des ressources visibles: ${resources.length} ressources reçues ===`);
+    // Écouter l'événement de ressources récupérées lors de la destruction d'un bâtiment
+    this.room.onMessage("resourcesRefunded", (data) => {
+      console.log("Ressources récupérées:", data);
       
-      // Créer un ensemble des nouvelles ressources
-      const newResourceIds = new Set(resources.map(r => r.id));
+      // Mettre à jour l'affichage des ressources
+      this.updateResourcesUI();
       
-      // Log détaillé des ressources reçues
-      console.log("Ressources reçues:", resources.map(r => `${r.id} (${r.type})`).join(', '));
-      console.log("Ressources actuellement visibles:", Array.from(this.visibleResources).join(', '));
+      // Position pour afficher les effets flottants (position du joueur)
+      const x = this.player ? this.player.x : this.cameras.main.width / 2;
+      const y = this.player ? this.player.y : this.cameras.main.height / 2;
       
-      // Supprimer les ressources qui ne sont plus visibles
-      let removedCount = 0;
-      this.visibleResources.forEach(id => {
-        if (!newResourceIds.has(id)) {
-          const sprite = this.resourceSprites.get(id);
-          if (sprite) {
-            sprite.destroy();
-            this.resourceSprites.delete(id);
-            removedCount++;
-          }
-          this.visibleResources.delete(id);
+      // Afficher un effet flottant pour chaque ressource récupérée
+      let offsetY = 0;
+      for (const [resource, amount] of Object.entries(data.refunds)) {
+        if (amount && typeof amount === 'number' && amount > 0) {
+          this.showNumericEffect(`+${amount}`, x, y - offsetY, resource as string);
+          offsetY += 20; // Espacer verticalement les effets
         }
-      });
-      
-      // Ajouter ou mettre à jour les nouvelles ressources
-      let addedCount = 0;
-      resources.forEach(resource => {
-        if (!this.visibleResources.has(resource.id)) {
-          this.createResourceSprite(resource);
-          this.visibleResources.add(resource.id);
-          addedCount++;
-        } else {
-          // Mettre à jour la ressource existante si nécessaire
-          const sprite = this.resourceSprites.get(resource.id);
-          if (sprite) {
-            sprite.setPosition(resource.x, resource.y);
-            // Mettre à jour d'autres propriétés si nécessaire
-          }
-        }
-      });
-      
-      console.log(`Ressources supprimées: ${removedCount}, ajoutées: ${addedCount}`);
-      console.log(`Total des ressources visibles: ${this.visibleResources.size}`);
+      }
     });
   }
   
@@ -1130,6 +1422,31 @@ export class GameScene extends Phaser.Scene {
     // Vérifier d'abord les murs
     if (this.isWallAt(x, y)) {
       return true;
+    }
+    
+    // Vérifier les bâtiments
+    if (this.room) {
+      const tileX = Math.floor(x / TILE_SIZE);
+      const tileY = Math.floor(y / TILE_SIZE);
+      
+      for (const [_, building] of this.room.state.buildings.entries()) {
+        const buildingTileX = Math.floor(building.x / TILE_SIZE);
+        const buildingTileY = Math.floor(building.y / TILE_SIZE);
+        
+        // Si c'est un mur ou un bâtiment avec collision sur toute la case
+        if (building.fullTileCollision && buildingTileX === tileX && buildingTileY === tileY) {
+          return true;
+        }
+        
+        // Pour les autres bâtiments, on considère une collision circulaire au centre
+        const buildingCenterX = building.x + TILE_SIZE/2;
+        const buildingCenterY = building.y + TILE_SIZE/2;
+        const distance = Phaser.Math.Distance.Between(x, y, buildingCenterX, buildingCenterY);
+        
+        if (distance < 12) { // Collision avec une partie centrale du bâtiment
+          return true;
+        }
+      }
     }
     
     // Rayon du joueur pour la détection de collision
@@ -1915,6 +2232,14 @@ export class GameScene extends Phaser.Scene {
   
   // Mettre à jour l'animation de récolte
   private updateMining(time: number) {
+    // Vérifier si le joueur est en train de miner (a cliqué)
+    if (!this.isMiningActive) {
+      // Si le joueur ne mine pas, désactiver l'état de récolte
+      this.isHarvesting = false;
+      this.harvestTarget = null;
+      return;
+    }
+    
     // Vérifier s'il y a une ressource sous la pioche
     const resourceHit = this.checkToolResourceCollision();
     
@@ -2089,31 +2414,41 @@ export class GameScene extends Phaser.Scene {
   
   // Afficher un effet numérique flottant
   private showNumericEffect(text: string, x: number, y: number, type: string = '') {
-    if (!this.numericEffects) return;
-
+    // Ne plus dépendre du groupe numericEffects
+    console.log(`Création d'un effet numérique: ${text} à (${x}, ${y}) de type ${type}`);
+    
     const color = type === 'gold' ? '#FFD700' : 
-                 type === 'wood' ? '#8B4513' : 
-                 type === 'stone' ? '#808080' : '#FFFFFF';
+                  type === 'wood' ? '#8B4513' : 
+                  type === 'stone' ? '#808080' : 
+                  type === 'iron' ? '#C0C0C0' :
+                  type === 'coal' ? '#333333' :
+                  type === 'steel' ? '#71797E' :
+                  '#FFFFFF';
 
     const effect = this.add.text(x, y - 20, text, {
       fontSize: '16px',
       color: color,
       stroke: '#000000',
-      strokeThickness: 2
+      strokeThickness: 2,
+      fontStyle: 'bold'
     });
     effect.setOrigin(0.5);
     effect.setDepth(100);
 
+    // Ajouter une animation plus visible
     this.tweens.add({
       targets: effect,
-      y: y - 40,
-      alpha: 0,
-      duration: 1000,
+      y: y - 50, // Monter plus haut
+      alpha: { from: 1, to: 0 },
+      scale: { from: 1, to: 1.5 }, // Grossir légèrement
+      duration: 1500, // Plus lente pour être plus visible
       ease: 'Power2',
       onComplete: () => {
         effect.destroy();
       }
     });
+    
+    return effect;
   }
   
   // Ajouter un petit effet de secousse à un sprite
@@ -2215,14 +2550,18 @@ export class GameScene extends Phaser.Scene {
     this.isPlacingBuilding = true;
     this.selectedBuildingType = buildingType;
     
-    // Créer l'aperçu du bâtiment
+    // Créer l'aperçu du bâtiment avec le bon nom de sprite
     if (this.buildingPreview) {
       this.buildingPreview.destroy();
     }
     
-    this.buildingPreview = this.add.sprite(0, 0, buildingType.toLowerCase());
+    // Utiliser le mapping pour obtenir le bon nom de sprite
+    const spriteName = GameScene.BUILDING_SPRITES[buildingType] || buildingType.toLowerCase();
+    
+    this.buildingPreview = this.add.sprite(0, 0, spriteName);
     this.buildingPreview.setAlpha(0.7);
     this.buildingPreview.setDepth(100);
+    this.buildingPreview.setScale(1);
   }
 
   private stopPlacingBuilding() {
@@ -2245,6 +2584,24 @@ export class GameScene extends Phaser.Scene {
     const player = this.room.state.players.get(this.room.sessionId);
     if (!player) return false;
     
+    // Vérifier la distance avec le joueur (max 2 cases)
+    if (this.player) {
+      const playerTileX = Math.floor(this.player.x / TILE_SIZE);
+      const playerTileY = Math.floor(this.player.y / TILE_SIZE);
+      const buildingTileX = Math.floor(tileX / TILE_SIZE);
+      const buildingTileY = Math.floor(tileY / TILE_SIZE);
+      
+      const distance = Math.max(
+        Math.abs(playerTileX - buildingTileX),
+        Math.abs(playerTileY - buildingTileY)
+      );
+      
+      if (distance > 2) {
+        return false;
+      }
+    }
+    
+    // Vérifier les ressources
     for (const [resource, amount] of Object.entries(costs)) {
       const playerResource = player.resources.get(resource) || 0;
       if (playerResource < amount) {
@@ -2252,12 +2609,24 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
-    // Vérifier si l'emplacement est libre
+    // Vérifier si l'emplacement est libre (pas d'autre bâtiment)
     for (const [_, building] of this.room.state.buildings.entries()) {
       const buildingTileX = Math.floor(building.x / TILE_SIZE) * TILE_SIZE;
       const buildingTileY = Math.floor(building.y / TILE_SIZE) * TILE_SIZE;
       
       if (buildingTileX === tileX && buildingTileY === tileY) {
+        return false;
+      }
+    }
+    
+    // Vérifier qu'il n'y a pas de ressource à cet emplacement
+    for (const [resourceId, resourceSprite] of this.resourceSprites.entries()) {
+      const resourceX = Math.floor(resourceSprite.x / TILE_SIZE) * TILE_SIZE;
+      const resourceY = Math.floor(resourceSprite.y / TILE_SIZE) * TILE_SIZE;
+      
+      // Vérifier si la ressource est sur la même case
+      if (resourceX === tileX && resourceY === tileY) {
+        console.log(`Impossible de construire sur une ressource en (${tileX/TILE_SIZE}, ${tileY/TILE_SIZE})`);
         return false;
       }
     }
@@ -2330,6 +2699,210 @@ export class GameScene extends Phaser.Scene {
       const isVisible = this.visibleScreenRect.contains(sprite.x, sprite.y);
       sprite.setVisible(isVisible);
       sprite.setActive(isVisible);
+    });
+  }
+
+  private updateBuildingPreview(tileX: number, tileY: number) {
+    if (!this.buildingPreview || !this.player) return;
+
+    const canPlace = this.checkCanPlaceBuilding(tileX, tileY);
+    const playerTileX = Math.floor(this.player.x / TILE_SIZE);
+    const playerTileY = Math.floor(this.player.y / TILE_SIZE);
+    const buildingTileX = Math.floor(tileX / TILE_SIZE);
+    const buildingTileY = Math.floor(tileY / TILE_SIZE);
+    
+    const distance = Math.max(
+      Math.abs(playerTileX - buildingTileX),
+      Math.abs(playerTileY - buildingTileY)
+    );
+
+    // Ajuster l'apparence selon la validité
+    if (distance > 2) {
+      // Trop loin : rouge transparent
+      this.buildingPreview.setAlpha(0.4);
+      this.buildingPreview.setTint(0xff0000);
+    } else if (!canPlace) {
+      // Invalide pour d'autres raisons : rouge moins transparent
+      this.buildingPreview.setAlpha(0.6);
+      this.buildingPreview.setTint(0xff0000);
+    } else {
+      // Valide : vert légèrement transparent
+      this.buildingPreview.setAlpha(0.8);
+      this.buildingPreview.setTint(0x00ff00);
+    }
+
+    this.buildingPreview.setPosition(tileX + TILE_SIZE/2, tileY + TILE_SIZE/2);
+    this.canPlaceBuilding = canPlace;
+  }
+
+  // Méthode utilitaire pour convertir une teinte en couleur Phaser
+  private hueToColor(hue: number): number {
+    // Convertir la teinte (0-360) en HSL puis en RGB
+    const s = 0.8; // Saturation fixe
+    const l = 0.5; // Luminosité fixe
+    
+    const c = (1 - Math.abs(2 * l - 1)) * s;
+    const x = c * (1 - Math.abs((hue / 60) % 2 - 1));
+    const m = l - c / 2;
+    
+    let r, g, b;
+    if (hue >= 0 && hue < 60) {
+      [r, g, b] = [c, x, 0];
+    } else if (hue >= 60 && hue < 120) {
+      [r, g, b] = [x, c, 0];
+    } else if (hue >= 120 && hue < 180) {
+      [r, g, b] = [0, c, x];
+    } else if (hue >= 180 && hue < 240) {
+      [r, g, b] = [0, x, c];
+    } else if (hue >= 240 && hue < 300) {
+      [r, g, b] = [x, 0, c];
+    } else {
+      [r, g, b] = [c, 0, x];
+    }
+    
+    // Convertir en RGB (0-255) puis en valeur hexadécimale
+    const red = Math.round((r + m) * 255);
+    const green = Math.round((g + m) * 255);
+    const blue = Math.round((b + m) * 255);
+    
+    // Retourner la couleur au format hexadécimal pour Phaser
+    return Phaser.Display.Color.GetColor(red, green, blue);
+  }
+  
+  // Méthode pour sélectionner un bâtiment
+  private selectBuilding(buildingId: string | null) {
+    console.log(`Tentative de sélection du bâtiment: ${buildingId}`);
+    
+    // Désélectionner le bâtiment précédent
+    if (this.selectedBuilding) {
+      const prevSprite = this.buildingSprites.get(this.selectedBuilding);
+      if (prevSprite) {
+        prevSprite.setTint(0xffffff); // Réinitialiser la teinte
+      }
+      
+      // Supprimer le bouton de destruction s'il existe
+      if (this.destroyButton) {
+        this.destroyButton.destroy();
+        this.destroyButton = null;
+      }
+      
+      // Supprimer le bouton toggle s'il existe
+      const prevToggleButton = prevSprite?.getData('toggleButton');
+      if (prevToggleButton) {
+        prevToggleButton.destroy();
+        prevSprite?.setData('toggleButton', null);
+      }
+    }
+    
+    this.selectedBuilding = buildingId;
+    
+    if (buildingId) {
+      const building = this.room.state.buildings.get(buildingId);
+      const sprite = this.buildingSprites.get(buildingId);
+      
+      console.log(`Bâtiment trouvé:`, building, `Sprite trouvé:`, sprite ? "oui" : "non");
+      
+      if (building && sprite) {
+        // Mettre en surbrillance le bâtiment sélectionné
+        sprite.setTint(0x00ffff);
+        
+        // Vérifier si le joueur est le propriétaire du bâtiment
+        console.log(`Propriétaire du bâtiment: ${building.owner}, sessionId du joueur: ${this.room.sessionId}`);
+        
+        if (building.owner === this.room.sessionId) {
+          console.log(`Le joueur est propriétaire, ajout du bouton de destruction`);
+          
+          // Créer l'emoji de recyclage (sans cercle de fond)
+          this.destroyButton = this.add.text(
+            sprite.x,
+            sprite.y - 24, // Position plus haute
+            "♻️",
+            { fontSize: '14px' } // Taille encore plus réduite
+          );
+          this.destroyButton.setOrigin(0.5);
+          this.destroyButton.setDepth(20);
+          
+          // Rendre l'emoji lui-même interactif
+          this.destroyButton.setInteractive({ useHandCursor: true });
+          this.destroyButton.on('pointerdown', (pointer) => {
+            console.log("Bouton de recyclage cliqué");
+            this.destroySelectedBuilding();
+          });
+          
+          // Si c'est un bâtiment de production, ajouter un bouton pour activer/désactiver
+          if (building.type === BuildingType.FURNACE || building.type === BuildingType.FORGE || building.type === BuildingType.FACTORY) {
+            // Déterminer l'emoji en fonction de l'état de production
+            const toggleEmoji = building.productionActive ? "⏸️" : "▶️";
+            
+            // Créer le bouton toggle
+            const toggleButton = this.add.text(
+              sprite.x + 24, // Position à droite du bâtiment
+              sprite.y - 24, // Même hauteur que le bouton de recyclage
+              toggleEmoji,
+              { fontSize: '14px' }
+            );
+            toggleButton.setOrigin(0.5);
+            toggleButton.setDepth(20);
+            
+            // Rendre le bouton interactif
+            toggleButton.setInteractive({ useHandCursor: true });
+            toggleButton.on('pointerdown', () => {
+              // Envoyer un message au serveur pour changer l'état
+              this.room.send("toggleProduction", {
+                buildingId,
+                active: !building.productionActive
+              });
+              
+              // Mettre à jour l'emoji du bouton
+              toggleButton.setText(building.productionActive ? "▶️" : "⏸️");
+            });
+            
+            // Stocker une référence au bouton
+            sprite.setData('toggleButton', toggleButton);
+          }
+        }
+      }
+    }
+  }
+  
+  // Méthode pour détruire le bâtiment sélectionné
+  private destroySelectedBuilding() {
+    if (this.selectedBuilding) {
+      console.log(`Demande de destruction du bâtiment: ${this.selectedBuilding}`);
+      
+      // Envoyer un message au serveur pour détruire le bâtiment
+      this.room.send("destroyBuilding", { buildingId: this.selectedBuilding });
+      
+      // Désélectionner le bâtiment
+      this.selectBuilding("");
+    }
+  }
+  
+  // Méthode pour mettre à jour les barres de progression des bâtiments de production
+  private updateProductionBars() {
+    if (!this.room || !this.room.state) return;
+    
+    this.room.state.buildings.forEach((building, buildingId) => {
+      const sprite = this.buildingSprites.get(buildingId);
+      if (sprite && sprite.getData('isProductionBuilding')) {
+        const progressBar = sprite.getData('progressBar');
+        
+        if (progressBar) {
+          // Calculer la largeur de la barre en fonction de la progression
+          const maxWidth = TILE_SIZE * 0.8;
+          const width = (building.productionProgress / 100) * maxWidth;
+          
+          // Mettre à jour la largeur de la barre
+          progressBar.width = width;
+          
+          // Couleur en fonction de l'activité (vert si actif, rouge si inactif)
+          if (building.productionActive) {
+            progressBar.fillColor = 0x00ff00;
+          } else {
+            progressBar.fillColor = 0xff0000;
+          }
+        }
+      }
     });
   }
 } 

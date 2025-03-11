@@ -19,7 +19,8 @@ export enum BuildingType {
   BARRACKS = "barracks",
   TOWN_CENTER = "town_center",
   YARD = "yard",
-  CABIN = "cabin"
+  CABIN = "cabin",
+  PLAYER_WALL = "player_wall"
 }
 
 export enum UnitType {
@@ -52,7 +53,7 @@ export class PlayerSchema extends Schema {
   @type("number") health: number = 100;
   @type("number") maxHealth: number = 100;
   @type("number") population: number = 0;
-  @type("number") maxPopulation: number = 10;
+  @type("number") maxPopulation: number = 0;
   @type("string") tool: string = "pickaxe";
   @type({ map: "number" }) resources = new MapSchema<number>();
 }
@@ -73,12 +74,15 @@ export class UnitSchema extends Schema {
 export class BuildingSchema extends Schema {
   @type("string") id: string = "";
   @type("string") type: string = BuildingType.HOUSE;
+  @type("string") owner: string = "";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") health: number = 100;
   @type("number") maxHealth: number = 100;
-  @type("number") productionProgress?: number;
+  @type("number") productionProgress: number = 0;
+  @type("boolean") productionActive: boolean = true;
   @type("number") influenceRadius?: number;
+  @type("boolean") fullTileCollision: boolean = false;
 }
 
 export class ResourceSchema extends Schema {
@@ -109,7 +113,8 @@ export const BUILDING_COSTS: BuildingCosts = {
   [BuildingType.BARRACKS]: { [ResourceType.WOOD]: 10, [ResourceType.IRON]: 10 },
   [BuildingType.TOWN_CENTER]: { [ResourceType.STONE]: 30, [ResourceType.WOOD]: 30, [ResourceType.GOLD]: 30 },
   [BuildingType.YARD]: { [ResourceType.IRON]: 20 },
-  [BuildingType.CABIN]: { [ResourceType.STEEL]: 20 }
+  [BuildingType.CABIN]: { [ResourceType.STEEL]: 20 },
+  [BuildingType.PLAYER_WALL]: { [ResourceType.STONE]: 10 }
 };
 
 export class GameState extends Schema {
