@@ -62,14 +62,16 @@ export class GameRoom extends Room<GameState> {
     [ResourceType.STEEL]: 999999999   // Désactivé temporairement
   };
 
-  onCreate() {
+  onCreate(options: { worldData: { mapLines: string[], resources: Map<string, ResourceSchema>, resourcesByChunk: Map<string, Set<string>> } }) {
     console.log("GameRoom created!");
     this.setState(new GameState());
     
-    // Charger la carte et générer les ressources
-    this.loadMap();
-    this.generateWorld();
-    this.generateResources();
+    // Utiliser les données du monde partagé
+    this.mapLines = options.worldData.mapLines;
+    this.resources = options.worldData.resources;
+    this.resourcesByChunk = options.worldData.resourcesByChunk;
+    
+    console.log(`GameRoom initialisée avec ${this.resources.size} ressources dans ${this.resourcesByChunk.size} chunks`);
     
     // Créer la boucle de simulation
     this.intervalId = setInterval(() => this.update(), this.SIMULATION_INTERVAL);
