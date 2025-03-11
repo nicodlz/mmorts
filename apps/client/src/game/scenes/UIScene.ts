@@ -58,8 +58,8 @@ export class UIScene extends Phaser.Scene {
   private createResourceDisplay() {
     // Créer un fond noir semi-transparent pour les ressources
     const padding = 15;
-    const width = 85;  // Augmenté pour éviter le débordement horizontal
-    const height = 180; // Augmenté de 150 à 180 pour éviter le débordement vertical
+    const width = 110;  // Augmenté pour éviter le débordement horizontal
+    const height = 200; // Augmenté pour plus d'espace
     const x = padding;
     const y = this.cameras.main.height - height - padding;
     
@@ -86,7 +86,7 @@ export class UIScene extends Phaser.Scene {
         resource.position.y, 
         `${resource.emoji}:0`, 
         { 
-          fontSize: '14px', 
+          fontSize: '16px', // Augmenté pour une meilleure lisibilité
           color: resource.color,
           stroke: '#000',
           strokeThickness: 1,
@@ -134,8 +134,8 @@ export class UIScene extends Phaser.Scene {
   
   // Mini-carte
   private createMinimap() {
-    const width = 180;  // Augmenté de 150 à 180
-    const height = 180; // Augmenté de 150 à 180
+    const width = 220;  // Augmenté pour une meilleure visibilité
+    const height = 220; // Augmenté pour une meilleure visibilité
     const x = this.cameras.main.width - width - 10;
     const y = this.cameras.main.height - height - 10;
     
@@ -162,8 +162,8 @@ export class UIScene extends Phaser.Scene {
     if (!gameInstance.player || !gameInstance.resourceSprites) return;
     
     // Récupérer les dimensions de la mini-carte
-    const width = 180;
-    const height = 180;
+    const width = 220;
+    const height = 220;
     const x = this.cameras.main.width - width - 10;
     const y = this.cameras.main.height - height - 10;
     
@@ -217,7 +217,8 @@ export class UIScene extends Phaser.Scene {
           const miniY = offsetY + (sprite.y * mapScale);
           
           this.minimap.fillStyle(color, 1);
-          this.minimap.fillRect(miniX - 1, miniY - 1, 2, 2);
+          // Réduire la taille des points de ressources à 1x1 pixel
+          this.minimap.fillRect(miniX, miniY, 1, 1);
         }
       });
     }
@@ -244,7 +245,7 @@ export class UIScene extends Phaser.Scene {
       const playerY = offsetY + (gameInstance.actualY * mapScale);
       
       this.minimap.fillStyle(0xFF0000, 1);
-      this.minimap.fillCircle(playerX, playerY, 2);
+      this.minimap.fillCircle(playerX, playerY, 3); // Légèrement plus grand pour le joueur
     }
   }
   

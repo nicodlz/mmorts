@@ -32,6 +32,9 @@ export class GameRoom extends Room<GameState> {
   private mapLines: string[] = [];
   private resourcesByChunk: Map<string, Set<string>> = new Map(); // Ressources par chunk
   
+  // Stocker les ressources en dehors de l'état pour éviter la synchronisation automatique
+  private resources: Map<string, ResourceSchema> = new Map();
+  
   // Ajouter des propriétés pour l'optimisation des broadcasts
   private playerUpdateRates: Map<string, { 
     lastFullUpdate: number,
@@ -97,9 +100,12 @@ export class GameRoom extends Room<GameState> {
     const player = new PlayerSchema();
     player.id = client.sessionId;
     
-    // Position initiale aléatoire
-    player.x = Math.floor(Math.random() * 800) + 800;
-    player.y = Math.floor(Math.random() * 800) + 800;
+    // Position initiale fixe à 10,12 (en tuiles)
+    const spawnX = 10;
+    const spawnY = 12;
+    player.x = spawnX * TILE_SIZE;
+    player.y = spawnY * TILE_SIZE;
+    console.log(`Position de spawn définie : (${player.x}, ${player.y})`);
     
     // Récupérer les infos du joueur depuis les options
     if (options && options.name) {
@@ -131,8 +137,10 @@ export class GameRoom extends Room<GameState> {
     
     // Envoyer uniquement les ressources dans les chunks proches du joueur
     const nearbyResources = this.getResourcesInRange(player.x, player.y);
+    console.log(`Envoi de ${nearbyResources.size} ressources au nouveau joueur (sur ${this.resources.size} au total)`);
+    
     const resourcesData = Array.from(nearbyResources).map(id => {
-      const resource = this.state.resources.get(id);
+      const resource = this.resources.get(id);
       return {
         id: resource?.id,
         type: resource?.type,
@@ -288,11 +296,9 @@ export class GameRoom extends Room<GameState> {
           resource.x = x * TILE_SIZE + TILE_SIZE/2;
           resource.y = y * TILE_SIZE + TILE_SIZE/2;
           resource.amount = this.RESOURCE_AMOUNTS[resourceType];
-          resource.maxAmount = this.RESOURCE_AMOUNTS[resourceType];
-          resource.respawnTime = this.RESOURCE_RESPAWN_TIMES[resourceType];
           
-          // Ajouter la ressource à l'état global
-          this.state.resources.set(resource.id, resource);
+          // Stocker la ressource dans notre map locale au lieu de l'état global
+          this.resources.set(resource.id, resource);
           
           // Ajouter la ressource au chunk correspondant
           const chunkX = Math.floor(x / CHUNK_SIZE);
@@ -306,6 +312,9 @@ export class GameRoom extends Room<GameState> {
         }
       }
     }
+    
+    console.log(`Nombre total de ressources générées: ${this.resources.size}`);
+    console.log(`Nombre de chunks contenant des ressources: ${this.resourcesByChunk.size}`);
   }
 
   // Nouvelle méthode pour obtenir les ressources dans un rayon de chunks
@@ -330,11 +339,15 @@ export class GameRoom extends Room<GameState> {
   // Gestion de la récolte de ressources
   private handleHarvest(client: Client, data: any) {
     const player = this.state.players.get(client.sessionId);
-    const resourceId = data.resourceId;
-    const resource = this.state.resources.get(resourceId) as ResourceSchema;
+    if (!player) return;
     
-    if (!player || !resource) {
-      console.log(`Ressource ou joueur non trouvé: ${resourceId}`);
+    const { resourceId } = data;
+    if (!resourceId) return;
+    
+    // Utiliser la map locale au lieu de l'état global
+    const resource = this.resources.get(resourceId);
+    if (!resource) {
+      console.log(`Ressource ${resourceId} non trouvée`);
       return;
     }
     
@@ -375,18 +388,9 @@ export class GameRoom extends Room<GameState> {
     // Réduire la quantité de ressource disponible
     resource.amount -= 1;
     
-    // Initialiser les ressources du joueur si nécessaire
-    if (!player.resources) {
-      player.resources = new MapSchema<number>();
-    }
-    
-    // Ajouter la ressource au joueur
-    const currentAmount = player.resources.get(resource.type) || 0;
-    player.resources.set(resource.type, currentAmount + 1);
-    
-    // Broadcast la mise à jour de la ressource à tous les clients
-    this.broadcast("resourceUpdate", {
-      resourceId: resourceId,
+    // Informer le client qui a récolté
+    client.send("resourceUpdate", {
+      resourceId,
       amount: resource.amount,
       playerId: client.sessionId,
       resourceType: resource.type
@@ -399,7 +403,7 @@ export class GameRoom extends Room<GameState> {
       // Planifier la réapparition
       const respawnTime = this.RESOURCE_RESPAWN_TIMES[resource.type] || 60000;
       setTimeout(() => {
-        if (this.state.resources.has(resourceId)) {
+        if (this.resources.has(resourceId)) {
           resource.amount = this.RESOURCE_AMOUNTS[resource.type] || resource.maxAmount;
           resource.isRespawning = false;
           
@@ -483,7 +487,7 @@ export class GameRoom extends Room<GameState> {
       console.log(`Envoi de ${nearbyResources.size} ressources au joueur ${client.sessionId}`);
       
       const resourcesData = Array.from(nearbyResources).map(id => {
-        const resource = this.state.resources.get(id);
+        const resource = this.resources.get(id);
         return {
           id: resource?.id,
           type: resource?.type,

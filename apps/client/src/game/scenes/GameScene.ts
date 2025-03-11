@@ -116,6 +116,9 @@ export class GameScene extends Phaser.Scene {
   private readonly RENDER_OPTIMIZATION_INTERVAL: number = 500; // ms entre les optimisations
   private visibleScreenRect: Phaser.Geom.Rectangle = new Phaser.Geom.Rectangle(0, 0, 0, 0);
   
+  // Ajouter cette propriété pour suivre si la position initiale a été définie
+  private initialPositionSet: boolean = false;
+  
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
@@ -234,9 +237,9 @@ export class GameScene extends Phaser.Scene {
     // Charger la carte
     this.loadMap();
     
-    // Position du joueur au centre de la carte
-    const mapCenterX = this.tileSize * 50;
-    const mapCenterY = this.tileSize * 50;
+    // Position temporaire du joueur (sera mise à jour à la connexion)
+    const mapCenterX = 10 * this.tileSize; // Position temporaire à x=10
+    const mapCenterY = 12 * this.tileSize; // Position temporaire à y=12
     
     // Initialiser les positions subpixel
     this.actualX = mapCenterX;
@@ -493,6 +496,29 @@ export class GameScene extends Phaser.Scene {
   // Configuration simplifiée des gestionnaires réseau Colyseus
   private setupNetworkHandlers() {
     if (!this.room) return;
+    
+    // Gestionnaire pour l'état initial du joueur
+    this.room.onStateChange((state) => {
+      console.log("État du jeu reçu:", state);
+      
+      // Récupérer notre joueur
+      const player = state.players.get(this.room.sessionId);
+      if (player) {
+        this.playerEntity = player;
+        
+        // Utiliser la position initiale fournie par le serveur
+        if (this.player && !this.initialPositionSet) {
+          this.actualX = player.x;
+          this.actualY = player.y;
+          this.player.setPosition(player.x, player.y);
+          console.log(`Position initiale définie: (${player.x}, ${player.y})`);
+          this.initialPositionSet = true;
+        }
+        
+        // Mettre à jour l'interface des ressources
+        this.updateResourcesUI();
+      }
+    });
     
     // Récupérer l'état initial
     console.log("État initial reçu:", this.room.state);
