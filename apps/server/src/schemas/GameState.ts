@@ -17,13 +17,25 @@ export const CHUNK_SIZE = 16;
 // Schéma pour un joueur
 export class PlayerSchema extends Schema {
   @type("string") id: string;
+  @type("string") name: string = "Player";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
+  @type("number") health: number = 100;
+  @type("number") maxHealth: number = 100;
   @type("number") hue: number = 0;
-  @type("string") name: string = "";
   @type("number") population: number = 0;
-  @type("number") maxPopulation: number = 0;
+  @type("number") maxPopulation: number = 10;
   @type({ map: "number" }) resources = new MapSchema<number>();
+  
+  // Propriétés pour le mode cible
+  @type("number") cursorTargetX: number = 0;
+  @type("number") cursorTargetY: number = 0;
+  @type("boolean") isTargetMode: boolean = false;
+  
+  // Nouvelles propriétés pour le déplacement des soldats
+  @type("number") unitMoveTargetX: number = 0;
+  @type("number") unitMoveTargetY: number = 0;
+  @type("boolean") isMovingUnits: boolean = false;
 }
 
 // Schéma pour une unité
@@ -35,6 +47,7 @@ export class UnitSchema extends Schema {
   @type("number") y: number = 0;
   @type("number") health: number = 100;
   @type("number") rotation: number = 0;
+  @type("boolean") isClickTargeting: boolean = false; // Indique si l'unité se déplace vers un point cliqué
 }
 
 // Schéma pour un bâtiment

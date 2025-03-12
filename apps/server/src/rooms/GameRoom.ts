@@ -37,6 +37,9 @@ export class GameRoom extends Room<GameState> {
   // Stocker les ressources en dehors de l'état pour éviter la synchronisation automatique
   private resources: Map<string, ResourceSchema> = new Map();
   
+  // Map pour stocker les informations de micro-mouvement des unités
+  private unitMicroMovements: Map<string, { x: number, y: number, phase: number }> = new Map();
+  
   // Système de production
   private readonly PRODUCTION_RATES: { [key: string]: number } = {
     [BuildingType.FURNACE]: 10000, // 10 secondes pour produire du charbon
@@ -93,10 +96,17 @@ export class GameRoom extends Room<GameState> {
   };
 
   onCreate(options: { worldData: { mapLines: string[], resources: Map<string, ResourceSchema>, resourcesByChunk: Map<string, Set<string>> } }) {
-    console.log("GameRoom created!");
+    // Initialiser l'état du jeu
     this.setState(new GameState());
     
-    // Utiliser les données du monde partagé
+    console.log("GameRoom créée");
+    
+    // Si des données de monde sont fournies, les utiliser
+    if (!options.worldData) {
+      console.error("ERREUR: Données de monde manquantes");
+      return;
+    }
+    
     this.mapLines = options.worldData.mapLines;
     this.resources = options.worldData.resources;
     this.resourcesByChunk = options.worldData.resourcesByChunk;
@@ -141,6 +151,161 @@ export class GameRoom extends Room<GameState> {
         building.productionActive = active;
         console.log(`Production ${active ? 'activée' : 'désactivée'} pour le bâtiment ${buildingId}`);
       }
+    });
+
+    // Gestionnaire pour la création d'unités (soldats)
+    this.onMessage("spawnUnit", (client, data) => {
+      const { buildingId, unitType } = data;
+      
+      // Vérifier que le client est le propriétaire du bâtiment
+      const building = this.state.buildings.get(buildingId);
+      if (!building || building.owner !== client.sessionId) {
+        console.log(`Le client ${client.sessionId} n'est pas autorisé à créer des unités dans le bâtiment ${buildingId}`);
+        return;
+      }
+      
+      // Vérifier que le bâtiment est une caserne
+      if (building.type !== BuildingType.BARRACKS) {
+        console.log(`Le bâtiment ${buildingId} n'est pas une caserne`);
+        return;
+      }
+      
+      // Obtenir le joueur
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      
+      // Vérifier que le joueur a assez de ressources (10 or, 10 fer)
+      const goldCost = 10;
+      const ironCost = 10;
+      
+      if ((player.resources.get(ResourceType.GOLD) || 0) < goldCost || 
+          (player.resources.get(ResourceType.IRON) || 0) < ironCost) {
+        console.log(`Le joueur ${client.sessionId} n'a pas assez de ressources pour créer un soldat`);
+        // Notifier le client que la création a échoué
+        client.send("unitCreationFailed", {
+          reason: "Ressources insuffisantes",
+          required: {
+            [ResourceType.GOLD]: goldCost,
+            [ResourceType.IRON]: ironCost
+          }
+        });
+        return;
+      }
+      
+      // Vérifier la population
+      if (player.population >= player.maxPopulation) {
+        console.log(`Le joueur ${client.sessionId} a atteint sa limite de population`);
+        client.send("unitCreationFailed", {
+          reason: "Population maximale atteinte"
+        });
+        return;
+      }
+      
+      // Déduire les ressources
+      player.resources.set(ResourceType.GOLD, (player.resources.get(ResourceType.GOLD) || 0) - goldCost);
+      player.resources.set(ResourceType.IRON, (player.resources.get(ResourceType.IRON) || 0) - ironCost);
+      
+      // Créer l'unité
+      const unit = new UnitSchema();
+      unit.id = `${unitType}_${client.sessionId}_${Date.now()}`;
+      unit.type = unitType;
+      unit.owner = client.sessionId;
+      
+      // Positionner l'unité près de la caserne en évitant les superpositions
+      // Vérifier s'il y a déjà des unités près de la caserne
+      const existingPositions: Array<{x: number, y: number}> = [];
+      
+      // Collecter les positions des unités existantes
+      this.state.units.forEach((unit) => {
+        if (Math.abs(unit.x - building.x) < TILE_SIZE * 3 && 
+            Math.abs(unit.y - building.y) < TILE_SIZE * 3) {
+          existingPositions.push({x: unit.x, y: unit.y});
+        }
+      });
+      
+      // Positions possibles autour de la caserne (8 directions)
+      const positions = [
+        { x: building.x + TILE_SIZE, y: building.y },              // droite
+        { x: building.x - TILE_SIZE, y: building.y },              // gauche
+        { x: building.x, y: building.y + TILE_SIZE },              // bas
+        { x: building.x, y: building.y - TILE_SIZE },              // haut
+        { x: building.x + TILE_SIZE, y: building.y + TILE_SIZE },  // bas-droite
+        { x: building.x - TILE_SIZE, y: building.y + TILE_SIZE },  // bas-gauche
+        { x: building.x + TILE_SIZE, y: building.y - TILE_SIZE },  // haut-droite
+        { x: building.x - TILE_SIZE, y: building.y - TILE_SIZE }   // haut-gauche
+      ];
+      
+      // Trouver une position libre
+      let position = positions[0]; // Position par défaut
+      
+      for (const pos of positions) {
+        // Vérifier si cette position est déjà occupée
+        const isOccupied = existingPositions.some(existingPos => 
+          Math.abs(existingPos.x - pos.x) < TILE_SIZE / 2 && 
+          Math.abs(existingPos.y - pos.y) < TILE_SIZE / 2
+        );
+        
+        if (!isOccupied) {
+          position = pos;
+          break;
+        }
+      }
+      
+      // Si toutes les positions sont occupées, ajouter un petit décalage aléatoire
+      if (position === positions[0] && existingPositions.length > 0) {
+        position.x += Math.random() * TILE_SIZE - TILE_SIZE / 2;
+        position.y += Math.random() * TILE_SIZE - TILE_SIZE / 2;
+      }
+      
+      unit.x = position.x;
+      unit.y = position.y;
+      
+      // Ajouter l'unité à l'état du jeu
+      this.state.units.set(unit.id, unit);
+      
+      // Augmenter la population du joueur
+      player.population += 1;
+      
+      console.log(`Soldat créé: ${unit.id} pour le joueur ${client.sessionId}`);
+      
+      // Notifier le client que la création a réussi
+      client.send("unitCreated", {
+        unitId: unit.id,
+        type: unitType,
+        position: { x: unit.x, y: unit.y }
+      });
+    });
+
+    // Gestionnaire pour la position du curseur en mode cible
+    this.onMessage("targetCursorPosition", (client, data) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+
+      // Vérifier si le mode cible a changé
+      const isTargetModeChanged = player.isTargetMode !== data.isTargetMode;
+
+      // Mettre à jour les propriétés du joueur
+      player.cursorTargetX = data.x;
+      player.cursorTargetY = data.y;
+      player.isTargetMode = data.isTargetMode;
+      
+      // N'afficher le message que si le mode a changé
+      if (isTargetModeChanged) {
+        console.log(`Mode cible de ${client.sessionId}: ${data.isTargetMode ? 'activé' : 'désactivé'} à (${data.x}, ${data.y})`);
+      }
+    });
+    
+    // Gestionnaire pour le déplacement des unités vers une cible
+    this.onMessage("unitMoveTarget", (client, data) => {
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      
+      // Mettre à jour les propriétés du joueur
+      player.unitMoveTargetX = data.x;
+      player.unitMoveTargetY = data.y;
+      player.isMovingUnits = data.isMoving;
+      
+      console.log(`Déplacement des unités de ${client.sessionId}: ${data.isMoving ? 'activé' : 'désactivé'} vers (${data.x}, ${data.y})`);
     });
   }
 
@@ -251,6 +416,9 @@ export class GameRoom extends Room<GameState> {
     
     // Gérer la production des bâtiments
     this.updateProduction();
+    
+    // Mettre à jour les positions des unités
+    this.updateUnitPositions();
     
     // Envoyer uniquement les mises à jour aux joueurs qui ont besoin de les voir
     this.optimizeBroadcasts();
@@ -408,9 +576,58 @@ export class GameRoom extends Room<GameState> {
         }
       });
       
-      // Mise à jour complète moins fréquente pour les entités éloignées
-      if (now - updateData.lastFullUpdate > this.DISTANT_UPDATE_RATE) {
-        // Envoyer des mises à jour pour les ressources et bâtiments éloignés à un taux réduit
+      // Mise à jour des unités - avec fréquence augmentée
+      // Augmenter à 10 fois par seconde (100ms) au lieu de 4 fois par seconde (250ms)
+      if (now - updateData.lastFullUpdate > 100) {
+        const client = this.clients.find(c => c.sessionId === sessionId);
+        if (!client) return;
+        
+        // Collecter toutes les unités visibles par ce joueur
+        const visibleUnits = [];
+        
+        // Les unités du joueur sont toujours visibles
+        const playerOwnedUnits = Array.from(this.state.units.values())
+          .filter(unit => unit.owner === sessionId);
+        
+        // Ajouter les unités proches appartenant à d'autres joueurs
+        const otherUnits = Array.from(this.state.units.values())
+          .filter(unit => unit.owner !== sessionId);
+        
+        for (const unit of otherUnits) {
+          const distance = Math.sqrt(
+            Math.pow(player.x - unit.x, 2) + 
+            Math.pow(player.y - unit.y, 2)
+          );
+          
+          // Si l'unité est à portée de vision
+          if (distance < TILE_SIZE * CHUNK_SIZE * 3) {
+            visibleUnits.push(unit);
+          }
+        }
+        
+        // Combiner les unités propres au joueur et les unités visibles
+        const allVisibleUnits = [...playerOwnedUnits, ...visibleUnits];
+        
+        // Envoyer les mises à jour des unités au client
+        if (allVisibleUnits.length > 0) {
+          const unitUpdates = allVisibleUnits.map(unit => ({
+            id: unit.id,
+            x: unit.x,
+            y: unit.y,
+            owner: unit.owner,
+            type: unit.type
+          }));
+          
+          client.send("unitPositions", {
+            units: unitUpdates
+          });
+          
+          // Réduire la verbosité du log en n'affichant pas à chaque envoi
+          if (Math.random() < 0.1) { // Log seulement 10% des envois
+            console.log(`Envoi de ${unitUpdates.length} positions d'unités à ${sessionId}`);
+          }
+        }
+        
         updateData.lastFullUpdate = now;
       }
     });
@@ -837,5 +1054,429 @@ export class GameRoom extends Room<GameState> {
       x: newX,
       y: newY
     }, { except: client });
+  }
+
+  // Nouvelle méthode pour mettre à jour les positions des unités
+  private updateUnitPositions() {
+    // Pour chaque joueur
+    this.state.players.forEach((player: PlayerSchema, playerId: string) => {
+      // Trouver toutes les unités appartenant à ce joueur
+      const playerUnits = Array.from(this.state.units.values())
+        .filter((unit: UnitSchema) => unit.owner === playerId && unit.type === "warrior");
+      
+      if (playerUnits.length === 0) return;
+      
+      // Déterminer le mode de mouvement des unités
+      if (player.isMovingUnits) {
+        // Mode déplacement vers une cible
+        // Activer le mode de ciblage par clic pour toutes les unités
+        playerUnits.forEach(unit => {
+          unit.isClickTargeting = true;
+        });
+        this.updateUnitsMoveTo(player, playerUnits);
+      }
+      else {
+        // Si on n'est plus en mode déplacement par clic,
+        // désactiver immédiatement le mode de ciblage pour toutes les unités
+        playerUnits.forEach(unit => {
+          unit.isClickTargeting = false;
+        });
+        
+        if (player.isTargetMode) {
+          // Mode cible (tab): formation en arcs face au curseur
+          this.updateUnitsTargetMode(player, playerUnits);
+        } else {
+          // Mode normal: formation derrière le joueur
+          this.updateUnitsFollowMode(player, playerUnits);
+        }
+      }
+    });
+  }
+  
+  // Formation en mode suivi normal (derrière le joueur)
+  private updateUnitsFollowMode(player: PlayerSchema, playerUnits: UnitSchema[]) {
+    const FOLLOW_DISTANCE = TILE_SIZE * 0.6; // Encore plus près du joueur
+    const UNIT_SPACING = TILE_SIZE * 0.45; // Formations encore plus denses
+    
+    // Calculer les positions en formation plus naturelle
+    playerUnits.forEach((unit: UnitSchema, index: number) => {
+      // Utiliser une formation en demi-cercle plutôt qu'en grille pour un aspect plus naturel
+      const unitCount = playerUnits.length;
+      
+      // Calculer l'angle pour chaque unité
+      // Distribuer les unités sur un arc de cercle de 180 degrés derrière le joueur
+      const angleStep = Math.PI / Math.max(unitCount - 1, 1);
+      let angle = Math.PI / 2 - Math.PI / 2; // Commence à -90 degrés (quart inférieur gauche)
+      
+      if (unitCount > 1) {
+        angle += angleStep * index;
+      }
+      
+      // Rayon du cercle basé sur le nombre d'unités (plus d'unités = cercle légèrement plus grand)
+      const radius = FOLLOW_DISTANCE + (Math.floor(index / 8) * UNIT_SPACING * 0.8);
+      
+      // Positions cibles relatives au joueur en utilisant des coordonnées polaires
+      // Ajout d'une légère variation pour un aspect plus naturel
+      const variationFactor = 0.15; // 15% de variation aléatoire
+      const radiusVariation = (1 - variationFactor/2) + Math.random() * variationFactor;
+      
+      let targetX = player.x + Math.cos(angle) * radius * radiusVariation;
+      let targetY = player.y + Math.sin(angle) * radius * radiusVariation;
+      
+      // Le reste du code existant pour le mouvement, la collision, etc.
+      this.moveUnitToTarget(unit, targetX, targetY, playerUnits, index);
+    });
+  }
+  
+  // Nouvelle méthode: Formation en mode cible (devant le joueur, face au curseur)
+  private updateUnitsTargetMode(player: PlayerSchema, playerUnits: UnitSchema[]) {
+    const unitCount = playerUnits.length;
+    
+    // Calculer l'angle vers le curseur
+    const angle = Math.atan2(player.cursorTargetY - player.y, player.cursorTargetX - player.x);
+    
+    // Paramètres de formation
+    const ARC_WIDTH = Math.PI * 0.6; // Arc de 108 degrés (plus large que 90)
+    const DISTANCE_FACTOR = TILE_SIZE * 0.8; // Distance de base depuis le joueur
+    const UNITS_PER_ARC = 7; // Nombre maximum d'unités par arc
+    
+    // Déterminer le nombre d'arcs nécessaires
+    const arcCount = Math.ceil(unitCount / UNITS_PER_ARC);
+    
+    // Distribuer les unités sur plusieurs arcs
+    playerUnits.forEach((unit: UnitSchema, index: number) => {
+      // Déterminer à quel arc appartient cette unité
+      const arcIndex = Math.floor(index / UNITS_PER_ARC);
+      const indexInArc = index % UNITS_PER_ARC;
+      
+      // Calculer le nombre d'unités dans cet arc particulier
+      const unitsInThisArc = Math.min(UNITS_PER_ARC, unitCount - arcIndex * UNITS_PER_ARC);
+      
+      // Calculer l'angle de cette unité dans l'arc
+      const arcStartAngle = angle - ARC_WIDTH / 2;
+      const arcStepAngle = unitsInThisArc <= 1 ? 0 : ARC_WIDTH / (unitsInThisArc - 1);
+      const unitAngle = arcStartAngle + arcStepAngle * indexInArc;
+      
+      // Distance de cet arc particulier (les arcs plus éloignés sont plus distants)
+      const arcDistance = DISTANCE_FACTOR * (1 + arcIndex * 0.6);
+      
+      // Calculer la position cible
+      let targetX = player.x + Math.cos(unitAngle) * arcDistance;
+      let targetY = player.y + Math.sin(unitAngle) * arcDistance;
+      
+      // Ajouter un léger décalage aléatoire pour un aspect plus naturel
+      const variationFactor = 0.1; // 10% de variation
+      targetX += (Math.random() - 0.5) * TILE_SIZE * variationFactor;
+      targetY += (Math.random() - 0.5) * TILE_SIZE * variationFactor;
+      
+      // Déplacer l'unité vers sa position cible
+      this.moveUnitToTarget(unit, targetX, targetY, playerUnits, index);
+    });
+  }
+  
+  // Nouvelle méthode pour déplacer les unités vers une position cible spécifique
+  private updateUnitsMoveTo(player: PlayerSchema, playerUnits: UnitSchema[]) {
+    const unitCount = playerUnits.length;
+    
+    // Coordonnées de la cible
+    const targetX = player.unitMoveTargetX;
+    const targetY = player.unitMoveTargetY;
+    
+    // Distance entre les unités dans la formation carrée (réduite pour une formation très serrée)
+    // Utiliser un écartement fixe qui ne dépend pas du nombre de soldats
+    const UNIT_SPACING = TILE_SIZE * 0.25; // Très serrée, 25% de la taille d'une tuile
+    
+    // Calculer un point central pour les unités qui vont former un groupe autour
+    const centerPoint = {
+      x: targetX,
+      y: targetY
+    };
+    
+    // Vérifier si le groupe a atteint sa destination
+    let allUnitsReachedTarget = true;
+    
+    // Organisation en formation carrée
+    // Calculer le nombre d'unités par côté du carré
+    const unitsPerSide = Math.ceil(Math.sqrt(unitCount));
+    
+    // Distribuer les unités en rangs et colonnes (formation carrée très serrée)
+    playerUnits.forEach((unit: UnitSchema, index: number) => {
+      // Calcul de la position dans la grille (ligne et colonne)
+      const row = Math.floor(index / unitsPerSide);
+      const col = index % unitsPerSide;
+      
+      // Centrer la formation autour du point central
+      const offsetX = (col - (unitsPerSide - 1) / 2) * UNIT_SPACING;
+      const offsetY = (row - (unitsPerSide - 1) / 2) * UNIT_SPACING;
+      
+      // Position cible finale - formation en rangs très serrés
+      const finalTargetX = centerPoint.x + offsetX;
+      const finalTargetY = centerPoint.y + offsetY;
+      
+      // Calculer la distance actuelle à la cible finale
+      const distanceToTarget = Math.sqrt(
+        Math.pow(finalTargetX - unit.x, 2) + 
+        Math.pow(finalTargetY - unit.y, 2)
+      );
+      
+      // Si l'unité est loin de sa cible, elle n'a pas atteint sa destination
+      if (distanceToTarget > TILE_SIZE * 0.5) {
+        allUnitsReachedTarget = false;
+      }
+      
+      // Déplacer l'unité vers sa position finale
+      this.moveUnitToTarget(unit, finalTargetX, finalTargetY, playerUnits, index);
+    });
+    
+    // Si toutes les unités ont atteint leur cible, on peut éventuellement notifier le client
+    if (allUnitsReachedTarget) {
+      // Notifier le client que les unités sont arrivées (pas besoin de désactiver isClickTargeting ici)
+      const client = this.clients.find(c => c.sessionId === player.id);
+      if (client) {
+        client.send("unitsReachedTarget", { success: true });
+      }
+    }
+  }
+
+  // Méthode commune pour déplacer une unité vers sa cible en évitant les obstacles
+  private moveUnitToTarget(unit: UnitSchema, targetX: number, targetY: number, allUnits: UnitSchema[], unitIndex: number) {
+    // Éviter que les unités ne se superposent
+    const isTooClose = allUnits.some((otherUnit: UnitSchema, otherIndex: number) => {
+      if (otherIndex >= unitIndex) return false; // Ne pas comparer avec les unités qui n'ont pas encore été positionnées
+      
+      const dx = targetX - otherUnit.x;
+      const dy = targetY - otherUnit.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      return distance < TILE_SIZE * 0.2; // Permettre une proximité encore plus grande (20% de la taille d'une tuile)
+    });
+    
+    // Si l'unité est trop proche d'une autre, ajuster légèrement sa position
+    if (isTooClose) {
+      targetX += (Math.random() - 0.5) * TILE_SIZE * 0.2;
+      targetY += (Math.random() - 0.5) * TILE_SIZE * 0.2;
+    }
+    
+    // Vérifier si la position cible est valide (pas sur un mur ou une ressource)
+    if (!this.isValidPosition(targetX, targetY)) {
+      // Si la position n'est pas valide, essayer de trouver une position valide à proximité
+      let validPositionFound = false;
+      
+      // Essayer jusqu'à 8 positions autour du joueur
+      const angles = [0, Math.PI/4, Math.PI/2, 3*Math.PI/4, Math.PI, 5*Math.PI/4, 3*Math.PI/2, 7*Math.PI/4];
+      
+      for (let i = 0; i < angles.length; i++) {
+        const testAngle = angles[i];
+        const testRadius = TILE_SIZE * 1.1; // Légèrement plus loin
+        const testX = targetX + Math.cos(testAngle) * testRadius;
+        const testY = targetY + Math.sin(testAngle) * testRadius;
+        
+        if (this.isValidPosition(testX, testY)) {
+          targetX = testX;
+          targetY = testY;
+          validPositionFound = true;
+          break;
+        }
+      }
+      
+      // Si aucune position valide n'est trouvée, essayer des distances plus grandes
+      if (!validPositionFound) {
+        for (let extraRadius = 1.2; extraRadius <= 2.0; extraRadius += 0.2) {
+          for (let i = 0; i < angles.length; i++) {
+            const testAngle = angles[i];
+            const testRadius = TILE_SIZE * extraRadius;
+            const testX = targetX + Math.cos(testAngle) * testRadius;
+            const testY = targetY + Math.sin(testAngle) * testRadius;
+            
+            if (this.isValidPosition(testX, testY)) {
+              targetX = testX;
+              targetY = testY;
+              validPositionFound = true;
+              break;
+            }
+          }
+          
+          if (validPositionFound) break;
+        }
+      }
+      
+      // En dernier recours, si aucune position valide n'est trouvée, garder la position actuelle
+      if (!validPositionFound) {
+        targetX = unit.x;
+        targetY = unit.y;
+      }
+    }
+    
+    // Ajouter un micro-mouvement réduit pour un aspect vivant mais stable
+    if (!this.unitMicroMovements.has(unit.id)) {
+      this.unitMicroMovements.set(unit.id, {
+        x: (Math.random() - 0.5) * TILE_SIZE * 0.1,
+        y: (Math.random() - 0.5) * TILE_SIZE * 0.1,
+        phase: Math.random() * Math.PI * 2
+      });
+    }
+    
+    // Récupérer les informations de micro-mouvement pour cette unité
+    const microMovement = this.unitMicroMovements.get(unit.id);
+    
+    // Appliquer un micro-mouvement sinusoïdal avec une période unique pour chaque unité
+    // Ralentir la fréquence du micro-mouvement pour plus de stabilité
+    const time = Date.now() / 1000;
+    
+    let microX = 0;
+    let microY = 0;
+    
+    // Vérifier que microMovement existe avant de l'utiliser
+    if (microMovement) {
+      microX = Math.sin(time * 0.3 + microMovement.phase) * microMovement.x;
+      microY = Math.cos(time * 0.4 + microMovement.phase) * microMovement.y;
+    }
+    
+    // Vérifier que la position avec micro-mouvement est valide
+    const newTargetX = targetX + microX;
+    const newTargetY = targetY + microY;
+    
+    // N'appliquer le micro-mouvement que si la nouvelle position est valide
+    if (this.isValidPosition(newTargetX, newTargetY)) {
+      targetX = newTargetX;
+      targetY = newTargetY;
+    }
+    
+    // Déplacer l'unité vers sa position cible avec un effet de lissage
+    const distanceToTarget = Math.sqrt(
+      Math.pow(targetX - unit.x, 2) + 
+      Math.pow(targetY - unit.y, 2)
+    );
+    
+    let newX, newY;
+    
+    // Vérifier si l'unité est en mode de ciblage par clic (déplacement vers point cliqué)
+    if (unit.isClickTargeting) {
+      // Approche de VITESSE CONSTANTE (pas de facteur)
+      // Utiliser un déplacement fixe en pixels par frame au lieu d'un pourcentage de la distance
+      
+      // Vitesse constante en pixels par frame, indépendante de la distance
+      // Vitesse de 3 pixels par frame
+      const FIXED_MOVEMENT_SPEED = 3.0; // pixels par frame
+      
+      // Si la distance est inférieure à la vitesse fixe, on arrive directement à destination
+      if (distanceToTarget <= FIXED_MOVEMENT_SPEED) {
+        newX = targetX;
+        newY = targetY;
+      } else {
+        // Sinon, calculer le vecteur de direction normalisé
+        const dirX = (targetX - unit.x) / distanceToTarget;
+        const dirY = (targetY - unit.y) / distanceToTarget;
+        
+        // Appliquer la vitesse constante dans la direction calculée
+        newX = unit.x + dirX * FIXED_MOVEMENT_SPEED;
+        newY = unit.y + dirY * FIXED_MOVEMENT_SPEED;
+      }
+    } else {
+      // Pour les autres modes (suivi normal, mode cible), conserver le comportement original
+      // Vitesse de base et vitesse max
+      const BASE_SPEED = 0.3;
+      const MAX_SPEED = 0.8;
+      
+      // Déterminer le facteur de vitesse en fonction de la distance
+      let speedFactor = BASE_SPEED;
+      
+      // Augmenter la vitesse en fonction de la distance
+      if (distanceToTarget > TILE_SIZE) {
+        // Calculer un facteur entre 0 et 1 basé sur la distance
+        const distanceFactor = Math.min((distanceToTarget - TILE_SIZE) / (TILE_SIZE * 2), 1);
+        
+        // Appliquer une fonction d'easing pour une transition plus lisse
+        const easedFactor = distanceFactor * distanceFactor; // Fonction quadratique simple
+        
+        // Interpoler entre la vitesse de base et la vitesse max
+        speedFactor = BASE_SPEED + easedFactor * (MAX_SPEED - BASE_SPEED);
+      }
+      
+      // Calculer la nouvelle position avec le facteur de vitesse
+      newX = unit.x + (targetX - unit.x) * speedFactor;
+      newY = unit.y + (targetY - unit.y) * speedFactor;
+    }
+    
+    // Vérifier que la nouvelle position est valide
+    if (this.isValidPosition(newX, newY)) {
+      // Appliquer le mouvement uniquement si la destination est valide
+      unit.x = newX;
+      unit.y = newY;
+    }
+  }
+
+  // Nouvelle méthode pour vérifier si une position est valide pour les unités
+  private isValidPosition(x: number, y: number): boolean {
+    // 1. Convertir en coordonnées de tuile
+    const tileX = Math.floor(x / TILE_SIZE);
+    const tileY = Math.floor(y / TILE_SIZE);
+    
+    // 2. Vérifier les murs
+    if (tileY < 0 || tileX < 0 || tileY >= this.mapLines.length || tileX >= this.mapLines[0].length) {
+      return false; // En dehors de la carte
+    }
+    
+    // Si c'est un mur (#), la position n'est pas valide
+    if (this.mapLines[tileY][tileX] === '#') {
+      return false;
+    }
+    
+    // 3. Vérifier les ressources - augmenter le rayon de recherche pour s'assurer de trouver toutes les ressources pertinentes
+    const nearbyResources = this.getResourcesInRange(x, y, 1); // Augmenté de 0.5 à 1 chunk
+    for (const resourceId of nearbyResources) {
+      const resource = this.resources.get(resourceId);
+      if (resource) {
+        // Déterminer un rayon de collision basé sur le type de ressource
+        let collisionRadius = TILE_SIZE * 0.8; // Rayon de base augmenté
+        
+        // Ajuster le rayon selon le type de ressource
+        switch (resource.type) {
+          case ResourceType.WOOD:
+            // Les arbres ont un rayon plus grand
+            collisionRadius = TILE_SIZE * 1.2;
+            break;
+          case ResourceType.STONE:
+            // Les pierres ont un rayon moyen
+            collisionRadius = TILE_SIZE * 1.0;
+            break;
+          case ResourceType.GOLD:
+            // L'or a un rayon standard
+            collisionRadius = TILE_SIZE * 0.9;
+            break;
+          default:
+            // Autres ressources, rayon standard
+            collisionRadius = TILE_SIZE * 0.8;
+        }
+        
+        // Calcul de distance entre la position et le centre de la ressource
+        const dx = x - resource.x;
+        const dy = y - resource.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        
+        // Si la distance est inférieure au rayon de collision, la position n'est pas valide
+        if (distance < collisionRadius) {
+          return false;
+        }
+      }
+    }
+    
+    // 4. Vérifier les bâtiments
+    for (const [_, building] of this.state.buildings.entries()) {
+      // Calcul de distance entre la position et le centre du bâtiment
+      const buildingCenterX = building.x + TILE_SIZE/2;
+      const buildingCenterY = building.y + TILE_SIZE/2;
+      const dx = x - buildingCenterX;
+      const dy = y - buildingCenterY;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      // Si la distance est inférieure au rayon de collision, la position n'est pas valide
+      if (distance < TILE_SIZE * 0.8) {
+        return false;
+      }
+    }
+    
+    // Si toutes les vérifications sont passées, la position est valide
+    return true;
   }
 } 

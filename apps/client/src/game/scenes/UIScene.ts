@@ -298,6 +298,21 @@ export class UIScene extends Phaser.Scene {
       color: '#FFFFFF',
       align: 'center'
     }).setOrigin(0.5);
+
+    // Panneau pour le bouton Tab (Combat/Selection)
+    const tabLabelX = buildLabelX - labelWidth - 5; // 5px de marge entre les boutons
+    const tabLabel = this.add.graphics();
+    tabLabel.fillStyle(0x000000, 0.7);
+    tabLabel.fillRect(tabLabelX, labelY, labelWidth, labelHeight);
+    tabLabel.lineStyle(1, 0x444444);
+    tabLabel.strokeRect(tabLabelX, labelY, labelWidth, labelHeight);
+    
+    // Texte pour le panneau Tab - épées croisées et symbole tab
+    const tabLabelText = this.add.text(tabLabelX + labelWidth/2, labelY + labelHeight/2, "⚔️ ↹", {
+      fontSize: '16px',
+      color: '#FFFFFF',
+      align: 'center'
+    }).setOrigin(0.5);
     
     // Configurer la mini-carte pour qu'elle reste en bas à droite
     this.minimap.setScrollFactor(0);
@@ -313,6 +328,7 @@ export class UIScene extends Phaser.Scene {
       const newLabelX = newX + width - labelWidth;
       const newLabelY = newY - labelHeight - 5;
       const newBuildLabelX = newLabelX - labelWidth - 5;
+      const newTabLabelX = newBuildLabelX - labelWidth - 5;
       
       // Mettre à jour le fond de la minimap
       this.minimap.clear();
@@ -342,6 +358,16 @@ export class UIScene extends Phaser.Scene {
       // Mettre à jour la position du bouton B et du texte
       buildLabelButton.setPosition(newBuildLabelX + labelWidth/2, newLabelY + labelHeight/2);
       buildLabelText.setPosition(newBuildLabelX + labelWidth/2, newLabelY + labelHeight/2);
+      
+      // Mettre à jour le panneau indicateur Tab
+      tabLabel.clear();
+      tabLabel.fillStyle(0x000000, 0.7);
+      tabLabel.fillRect(newTabLabelX, newLabelY, labelWidth, labelHeight);
+      tabLabel.lineStyle(1, 0x444444);
+      tabLabel.strokeRect(newTabLabelX, newLabelY, labelWidth, labelHeight);
+      
+      // Mettre à jour la position du texte Tab
+      tabLabelText.setPosition(newTabLabelX + labelWidth/2, newLabelY + labelHeight/2);
       
       this.updateMinimap();
     });

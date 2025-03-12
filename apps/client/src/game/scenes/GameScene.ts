@@ -40,6 +40,7 @@ export class GameScene extends Phaser.Scene {
     targetX: number; 
     targetY: number;
     nameText?: Phaser.GameObjects.Text;
+    walkingPhase?: number;
   }> = new Map();
   private buildingSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   
@@ -142,6 +143,17 @@ export class GameScene extends Phaser.Scene {
   private clickedOnGameObject: boolean = false;
   
   private lastProductionBarsUpdate: number = 0;
+  
+  private lastUnitSyncCheck = 0;
+  
+  private lastCursorUpdate: number = 0;
+  private lastCursorMode: boolean = true;
+  
+  // Variables pour le clic prolongé des soldats
+  private isLongPressing: boolean = false;
+  private longPressTimer: number = 0;
+  private longPressTarget: { x: number, y: number } | null = null;
+  private readonly LONG_PRESS_THRESHOLD: number = 200; // Millisecondes avant qu'un clic soit considéré comme prolongé
   
   constructor() {
     super({ key: 'GameScene' });
@@ -482,7 +494,7 @@ export class GameScene extends Phaser.Scene {
   }
   
   update(time: number, delta: number) {
-    if (!this.player) return;
+    if (!this.room || !this.player) return;
     
     // Déterminer le chunk actuel du joueur
     const playerChunkX = Math.floor(this.actualX / (this.tileSize * this.CHUNK_SIZE));
@@ -490,7 +502,7 @@ export class GameScene extends Phaser.Scene {
     
     // Ne charger les chunks que si le joueur a changé de chunk
     if (playerChunkX !== this.lastLoadedChunkX || playerChunkY !== this.lastLoadedChunkY) {
-      // Remplacer updateVisibleTiles par updateVisibleChunks
+      // Mettre à jour les chunks visibles
       this.updateVisibleChunks(playerChunkX, playerChunkY);
       this.lastLoadedChunkX = playerChunkX;
       this.lastLoadedChunkY = playerChunkY;
@@ -505,17 +517,34 @@ export class GameScene extends Phaser.Scene {
     // Gérer le mouvement du joueur
     this.handlePlayerMovement();
     
-    // Vérifier si la position a réellement changé (au-delà d'un certain seuil)
-    const hasMoved = Math.abs(this.actualX - this.lastPlayerX) > this.positionThreshold || 
-                    Math.abs(this.actualY - this.lastPlayerY) > this.positionThreshold;
+    // Mettre à jour les positions des autres joueurs avec interpolation
+    this.updateOtherPlayers(delta);
     
-    // Mettre à jour l'outil seulement si nécessaire
+    // Mettre à jour les positions des unités avec interpolation
+    this.updateUnits(delta);
+    
+    // Mettre à jour l'outil
     this.updateTool();
     
-    // Gérer le minage et la collecte
-    if (this.isMiningActive && this.isToolMode) {
-      this.updateMining(time);
+    // Envoyer la position du curseur au serveur si en mode main (non-outil)
+    if (!this.isToolMode && time - (this.lastCursorUpdate || 0) > 200) { // Limiter à 5 fois par seconde
+      const pointer = this.input.activePointer;
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      this.room.send("targetCursorPosition", {
+        x: worldPoint.x,
+        y: worldPoint.y,
+        isTargetMode: true
+      });
+      this.lastCursorUpdate = time;
+    } else if (this.isToolMode && this.lastCursorMode !== this.isToolMode) {
+      // Si on revient en mode outil, informer le serveur
+      this.room.send("targetCursorPosition", {
+        x: 0,
+        y: 0,
+        isTargetMode: false
+      });
     }
+    this.lastCursorMode = this.isToolMode;
     
     // Mettre à jour l'animation de l'outil (AJOUT CRITIQUE)
     this.updateToolAnimation(time, delta);
@@ -534,12 +563,10 @@ export class GameScene extends Phaser.Scene {
       );
     }
     
-    // Mettre à jour les positions des autres joueurs avec interpolation
-    this.updateOtherPlayers(delta);
-    
     // Synchroniser la position avec le serveur (limité par la fréquence et seulement si on a bougé)
     const now = time;
-    if (hasMoved && now - this.lastNetworkUpdate > this.NETWORK_UPDATE_RATE) {
+    if (Math.abs(this.actualX - this.lastPlayerX) > this.positionThreshold || 
+                    Math.abs(this.actualY - this.lastPlayerY) > this.positionThreshold) {
       this.synchronizePlayerPosition();
       this.lastNetworkUpdate = now;
       
@@ -574,6 +601,34 @@ export class GameScene extends Phaser.Scene {
     if (time - this.lastProductionBarsUpdate > 200) { // Toutes les 200ms au lieu de chaque frame
       this.updateProductionBars();
       this.lastProductionBarsUpdate = time;
+    }
+    
+    // Vérifier périodiquement la synchronisation des unités (toutes les 5 secondes)
+    if (time - this.lastUnitSyncCheck > 5000) {
+      this.checkUnitSynchronization();
+      this.lastUnitSyncCheck = time;
+      
+      // Ajouter un diagnostic périodique
+      this.logEntitiesStatus();
+    }
+    
+    // Vérifier si on a un clic prolongé en cours
+    if (!this.isToolMode && this.longPressTarget && this.input.activePointer.isDown) {
+      const pressDuration = Date.now() - this.longPressTimer;
+      
+      // Si la durée dépasse le seuil et qu'on n'est pas déjà en mode clic prolongé
+      if (pressDuration > this.LONG_PRESS_THRESHOLD && !this.isLongPressing) {
+        this.isLongPressing = true;
+        
+        // Envoyer la position cible au serveur
+        if (this.room) {
+          this.room.send("unitMoveTarget", {
+            x: this.longPressTarget.x,
+            y: this.longPressTarget.y,
+            isMoving: true
+          });
+        }
+      }
     }
   }
   
@@ -622,6 +677,33 @@ export class GameScene extends Phaser.Scene {
         name: message.name,
         hue: message.hue
       }, message.sessionId);
+    });
+    
+    // NOUVEAU GESTIONNAIRE: Mise à jour des positions des unités
+    this.room.onMessage("unitPositions", (message) => {
+      // Vérifier que le message est bien formaté
+      if (!message.units || !Array.isArray(message.units)) {
+        console.error("Format de message unitPositions invalide:", message);
+        return;
+      }
+      
+      console.log(`Reçu ${message.units.length} positions d'unités`);
+      
+      // Mettre à jour les positions des unités
+      message.units.forEach(unit => {
+        // Vérifier si l'unité existe déjà dans notre collection
+        if (this.unitSprites.has(unit.id)) {
+          // Mettre à jour la position cible
+          const unitData = this.unitSprites.get(unit.id);
+          if (unitData) {
+            unitData.targetX = unit.x;
+            unitData.targetY = unit.y;
+          }
+        } else {
+          // Si l'unité n'existe pas encore, la créer
+          this.createUnitSprite(unit, unit.id);
+        }
+      });
     });
     
     // Écouter les messages d'épuisement de ressources
@@ -840,16 +922,39 @@ export class GameScene extends Phaser.Scene {
     });
     
     // Écouter l'ajout d'unités
-    this.room.state.listen("units/:id", "add", (unitId, unit) => {
+    this.room.state.units.onAdd = (unit, unitId) => {
       console.log(`Unité ajoutée: ${unitId}`, unit);
-      // Ajouter le code pour gérer les unités ici si nécessaire
-    });
+      
+      // Vérifier si cette unité n'existe pas déjà pour éviter les doublons
+      if (!this.unitSprites.has(unitId)) {
+        this.createUnitSprite(unit, unitId);
+        console.log(`Sprite créé pour l'unité ${unitId}`);
+      } else {
+        console.log(`L'unité ${unitId} existe déjà, pas de création de sprite`);
+      }
+    };
     
     // Écouter la suppression d'unités
-    this.room.state.listen("units/:id", "remove", (unitId) => {
+    this.room.state.units.onRemove = (unit, unitId) => {
       console.log(`Unité supprimée: ${unitId}`);
-      // Ajouter le code pour gérer la suppression d'unités ici si nécessaire
-    });
+      const unitData = this.unitSprites.get(unitId);
+      if (unitData) {
+        unitData.sprite.destroy();
+        if (unitData.nameText) {
+          unitData.nameText.destroy();
+        }
+        this.unitSprites.delete(unitId);
+      }
+    };
+
+    // Écouter les changements de position des unités
+    this.room.state.units.onChange = (unit, unitId) => {
+      const unitData = this.unitSprites.get(unitId);
+      if (unitData) {
+        unitData.targetX = unit.x;
+        unitData.targetY = unit.y;
+      }
+    };
 
     // Écouter les changements sur les ressources
     this.room.state.resources.onAdd = (resource: any, resourceId: string) => {
@@ -1240,6 +1345,69 @@ export class GameScene extends Phaser.Scene {
         }
       }
     });
+
+    // Gestionnaire pour l'échec de création d'unité
+    this.room.onMessage("unitCreationFailed", (data: {
+      reason: string,
+      required?: { [resource: string]: number }
+    }) => {
+      console.log("CRÉATION D'UNITÉ ÉCHOUÉE:", data);
+      
+      // Afficher un message au joueur
+      const x = this.player ? this.player.x : this.cameras.main.width / 2;
+      const y = this.player ? this.player.y : this.cameras.main.height / 2;
+      
+      // Utiliser une couleur rouge pour indiquer l'erreur
+      this.showNumericEffect(data.reason, x, y - 20, 'error');
+      
+      // Si des ressources requises sont spécifiées, les afficher
+      if (data.required) {
+        let offsetY = 0;
+        for (const [resource, amount] of Object.entries(data.required)) {
+          const currentAmount = this.playerEntity.resources.get(resource) || 0;
+          const missingAmount = amount - currentAmount;
+          
+          if (missingAmount > 0) {
+            this.showNumericEffect(`Manque ${missingAmount} ${resource}`, x, y - 40 - offsetY, 'error');
+            offsetY += 20;
+          }
+        }
+      }
+    });
+
+    // Gestionnaire pour la création réussie d'unité
+    this.room.onMessage("unitCreated", (data: {
+      unitId: string,
+      type: string,
+      position: { x: number, y: number }
+    }) => {
+      console.log("UNITÉ CRÉÉE:", data);
+      
+      // Vérifier si cette unité existe déjà (pour éviter les doublons)
+      if (!this.unitSprites.has(data.unitId)) {
+        // Rechercher le propriétaire de l'unité (propriétaire probable: nous-mêmes)
+        const owner = this.room.state.players.get(this.room.sessionId);
+        if (owner) {
+          // Créer l'unité immédiatement sans attendre la mise à jour d'état
+          const unit = {
+            x: data.position.x,
+            y: data.position.y,
+            type: data.type,
+            owner: this.room.sessionId
+          };
+          
+          // Créer le sprite pour cette unité
+          this.createUnitSprite(unit, data.unitId);
+          
+          console.log(`Sprite créé immédiatement pour l'unité ${data.unitId}`);
+          
+          // Effet visuel pour signaler la création
+          this.showNumericEffect("✓", data.position.x, data.position.y - 15, 'success');
+        }
+      } else {
+        console.log(`Le sprite pour l'unité ${data.unitId} existe déjà`);
+      }
+    });
   }
   
   // Crée un sprite pour un autre joueur
@@ -1564,6 +1732,17 @@ export class GameScene extends Phaser.Scene {
       this.input.setDefaultCursor('url(/cursors/pickaxe.cur), pointer');
     } else {
       this.input.setDefaultCursor('url(/cursors/hand.cur), pointer');
+      
+      // Si on passe en mode main, envoyer immédiatement la position du curseur
+      if (this.room) {
+        const pointer = this.input.activePointer;
+        const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+        this.room.send("targetCursorPosition", {
+          x: worldPoint.x,
+          y: worldPoint.y,
+          isTargetMode: true
+        });
+      }
     }
   }
   
@@ -2064,21 +2243,75 @@ export class GameScene extends Phaser.Scene {
 
   // Gestionnaire d'événement quand le joueur appuie sur la souris
   private handlePointerDown(pointer: Phaser.Input.Pointer) {
-    // Si le joueur n'est pas en mode outil, ignorer
-    if (!this.isToolMode || !this.player || !this.tool) return;
-    
-    // Activer le minage
-    this.isMiningActive = true;
-    
-    // Démarrer immédiatement l'animation
-    this.animatePickaxe();
+    // Si le joueur est en mode outil, gérer le minage
+    if (this.isToolMode) {
+      // Activer le minage
+      this.isMiningActive = true;
+      
+      // Démarrer immédiatement l'animation
+      this.animatePickaxe();
+    } 
+    // Si en mode main (Tab), commencer à vérifier pour un clic prolongé
+    else {
+      // Enregistrer le moment où le clic a commencé
+      this.longPressTimer = Date.now();
+      
+      // Calculer les coordonnées mondiales du clic
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      
+      // Stocker la position cible
+      this.longPressTarget = { x: worldPoint.x, y: worldPoint.y };
+      
+      // Écouter l'événement pointermove pour mettre à jour la position cible pendant un clic prolongé
+      this.input.on('pointermove', this.handlePointerMove, this);
+    }
   }
   
+  // Nouvelle méthode pour gérer le déplacement du pointeur pendant un clic
+  private handlePointerMove(pointer: Phaser.Input.Pointer) {
+    if (!this.isToolMode && this.longPressTarget && this.input.activePointer.isDown) {
+      // Mettre à jour la position cible avec les nouvelles coordonnées
+      const worldPoint = this.cameras.main.getWorldPoint(pointer.x, pointer.y);
+      this.longPressTarget.x = worldPoint.x;
+      this.longPressTarget.y = worldPoint.y;
+      
+      // Si on est déjà en mode clic prolongé, envoyer immédiatement la nouvelle position
+      if (this.isLongPressing && this.room) {
+        this.room.send("unitMoveTarget", {
+          x: this.longPressTarget.x,
+          y: this.longPressTarget.y,
+          isMoving: true
+        });
+      }
+    }
+  }
+
   // Gestionnaire d'événement quand le joueur relâche la souris
   private handlePointerUp() {
-    this.isMiningActive = false;
-    this.isHarvesting = false;
-    this.harvestTarget = null;
+    // Si le joueur était en mode outil, désactiver le minage
+    if (this.isToolMode) {
+      // Désactiver le minage
+      this.isMiningActive = false;
+    } 
+    // Si en mode main (Tab)
+    else if (this.longPressTarget) {
+      // Nettoyer l'écouteur d'événement pointermove
+      this.input.off('pointermove', this.handlePointerMove, this);
+      
+      // Si c'était un clic prolongé, informer le serveur de l'arrêt
+      if (this.isLongPressing && this.room) {
+        this.room.send("unitMoveTarget", {
+          x: 0,
+          y: 0,
+          isMoving: false
+        });
+        this.isLongPressing = false;
+      }
+      
+      // Réinitialiser les variables de suivi
+      this.longPressTarget = null;
+      this.longPressTimer = 0;
+    }
   }
   
   // Animation de pioche plus visible et naturelle
@@ -2771,63 +3004,79 @@ export class GameScene extends Phaser.Scene {
   
   // Méthode pour sélectionner un bâtiment
   private selectBuilding(buildingId: string | null) {
-    console.log(`Tentative de sélection du bâtiment: ${buildingId}`);
+    // Convertir null en chaîne vide pour compatibilité
+    const id = buildingId === null ? "" : buildingId;
     
-    // Désélectionner le bâtiment précédent
+    // Gérer la déselection
     if (this.selectedBuilding) {
-      const prevSprite = this.buildingSprites.get(this.selectedBuilding);
-      if (prevSprite) {
-        prevSprite.setTint(0xffffff); // Réinitialiser la teinte
-      }
-      
-      // Supprimer le bouton de destruction s'il existe
-      if (this.destroyButton) {
-        this.destroyButton.destroy();
-        this.destroyButton = null;
-      }
-      
-      // Supprimer le bouton toggle s'il existe
-      const prevToggleButton = prevSprite?.getData('toggleButton');
-      if (prevToggleButton) {
-        prevToggleButton.destroy();
-        prevSprite?.setData('toggleButton', null);
+      // Enlever la surbrillance du bâtiment précédemment sélectionné
+      const prevBuilding = this.buildingSprites.get(this.selectedBuilding);
+      if (prevBuilding) {
+        prevBuilding.clearTint();
+        
+        // Détruire le bouton de recyclage s'il existe
+        if (prevBuilding.getData('destroyButton')) {
+          const prevRecycleButton = prevBuilding.getData('destroyButton');
+          prevRecycleButton.destroy();
+          prevBuilding.setData('destroyButton', null);
+        }
+        
+        // Détruire le bouton toggle s'il existe (production)
+        if (prevBuilding.getData('toggleButton')) {
+          const prevToggleButton = prevBuilding.getData('toggleButton');
+          prevToggleButton.destroy();
+          prevBuilding.setData('toggleButton', null);
+        }
+        
+        // Détruire le bouton d'épée s'il existe (caserne)
+        if (prevBuilding.getData('swordButton')) {
+          const prevSwordButton = prevBuilding.getData('swordButton');
+          prevSwordButton.destroy();
+          prevBuilding.setData('swordButton', null);
+        }
       }
     }
     
-    this.selectedBuilding = buildingId;
+    // Si on déselectionne ou si le bâtiment n'existe pas
+    if (id === "" || !this.buildingSprites.get(id)) {
+      this.selectedBuilding = "";
+      return;
+    }
     
-    if (buildingId) {
-      const building = this.room.state.buildings.get(buildingId);
-      const sprite = this.buildingSprites.get(buildingId);
+    // Récupérer les infos du bâtiment
+    const building = {
+      sprite: this.buildingSprites.get(id),
+      entity: this.room.state.buildings.get(id)
+    };
+    
+    // Récupérer le sprite et les données du bâtiment
+    const sprite = this.buildingSprites.get(id);
+    if (sprite) {
+      const building = this.room.state.buildings.get(id);
       
-      console.log(`Bâtiment trouvé:`, building, `Sprite trouvé:`, sprite ? "oui" : "non");
-      
-      if (building && sprite) {
-        // Mettre en surbrillance le bâtiment sélectionné
-        sprite.setTint(0x00ffff);
+      if (building) {
+        const isOwner = building.owner === this.room.sessionId;
         
-        // Vérifier si le joueur est le propriétaire du bâtiment
-        console.log(`Propriétaire du bâtiment: ${building.owner}, sessionId du joueur: ${this.room.sessionId}`);
-        
-        if (building.owner === this.room.sessionId) {
-          console.log(`Le joueur est propriétaire, ajout du bouton de destruction`);
-          
-          // Créer l'emoji de recyclage (sans cercle de fond)
-          this.destroyButton = this.add.text(
-            sprite.x,
-            sprite.y - 24, // Position plus haute
+        // Si c'est un bâtiment du joueur, créer un bouton de recyclage
+        if (isOwner) {
+          // Créer le bouton de recyclage
+          const destroyButton = this.add.text(
+            sprite.x - 24, // Position à gauche du bâtiment
+            sprite.y - 24, // Position au-dessus du bâtiment
             "♻️",
-            { fontSize: '14px' } // Taille encore plus réduite
+            { fontSize: '14px' }
           );
-          this.destroyButton.setOrigin(0.5);
-          this.destroyButton.setDepth(20);
+          destroyButton.setOrigin(0.5);
+          destroyButton.setDepth(50); // Augmenter la profondeur Z pour être au-dessus des autres éléments
           
-          // Rendre l'emoji lui-même interactif
-          this.destroyButton.setInteractive({ useHandCursor: true });
-          this.destroyButton.on('pointerdown', (pointer) => {
-            console.log("Bouton de recyclage cliqué");
+          // Rendre le bouton interactif
+          destroyButton.setInteractive({ useHandCursor: true });
+          destroyButton.on('pointerdown', () => {
             this.destroySelectedBuilding();
           });
+          
+          // Stocker une référence au bouton sur le sprite
+          sprite.setData('destroyButton', destroyButton);
           
           // Si c'est un bâtiment de production, ajouter un bouton pour activer/désactiver
           if (building.type === BuildingType.FURNACE || building.type === BuildingType.FORGE || building.type === BuildingType.FACTORY) {
@@ -2842,7 +3091,7 @@ export class GameScene extends Phaser.Scene {
               { fontSize: '14px' }
             );
             toggleButton.setOrigin(0.5);
-            toggleButton.setDepth(20);
+            toggleButton.setDepth(50); // Augmenter la profondeur Z
             
             // Rendre le bouton interactif
             toggleButton.setInteractive({ useHandCursor: true });
@@ -2860,9 +3109,49 @@ export class GameScene extends Phaser.Scene {
             // Stocker une référence au bouton
             sprite.setData('toggleButton', toggleButton);
           }
+          
+          // Si c'est une caserne, ajouter un emoji épée
+          if (building.type === BuildingType.BARRACKS) {
+            // Créer le bouton avec l'emoji épée
+            const swordButton = this.add.text(
+              sprite.x + 24, // Position à droite du bâtiment
+              sprite.y - 24, // Même hauteur que le bouton de recyclage
+              "⚔️",
+              { fontSize: '14px' }
+            );
+            swordButton.setOrigin(0.5);
+            swordButton.setDepth(50); // Augmenter la profondeur Z
+            
+            // Rendre le bouton interactif
+            swordButton.setInteractive({ useHandCursor: true });
+            
+            swordButton.on('pointerdown', () => {
+              console.log("Bouton de production de soldats cliqué");
+              
+              // Effet visuel temporaire pour indiquer la demande
+              this.tweens.add({
+                targets: swordButton,
+                scale: 1.5,
+                duration: 200,
+                yoyo: true,
+                ease: 'Power2'
+              });
+              
+              // Envoyer un message au serveur pour créer un soldat
+              this.room.send("spawnUnit", {
+                buildingId: buildingId,
+                unitType: "warrior"
+              });
+            });
+            
+            // Stocker une référence au bouton
+            sprite.setData('swordButton', swordButton);
+          }
         }
       }
     }
+    
+    this.selectedBuilding = buildingId;
   }
   
   // Méthode pour détruire le bâtiment sélectionné
@@ -2904,5 +3193,262 @@ export class GameScene extends Phaser.Scene {
         }
       }
     });
+  }
+
+  // Ajouter cette méthode pour créer la représentation visuelle d'une unité
+  private createUnitSprite(unit: any, unitId: string) {
+    console.log(`Création du sprite pour l'unité ${unitId}`, unit);
+    
+    // Trouver le propriétaire de l'unité pour obtenir sa couleur
+    const owner = this.room.state.players.get(unit.owner);
+    if (!owner) {
+      console.error(`Propriétaire ${unit.owner} introuvable pour l'unité ${unitId}`);
+      return;
+    }
+    
+    // Convertir la teinte en couleur RGB
+    const color = this.hueToRgb(owner.hue);
+    
+    // Créer un container pour l'unité
+    const container = this.add.container(unit.x, unit.y);
+    container.setDepth(10);
+    
+    // Créer un carré plus petit que le joueur (75%)
+    const unitSize = 6 * 0.75; // 75% de la taille du joueur (qui est 6)
+    
+    // Créer le carré avec la couleur du propriétaire
+    const graphics = this.add.graphics();
+    graphics.fillStyle(color, 1);
+    graphics.fillRect(-unitSize/2, -unitSize/2, unitSize, unitSize);
+    
+    // Contour plus foncé
+    const darkerColor = this.getDarkerColor(color);
+    graphics.lineStyle(1, darkerColor, 1);
+    graphics.strokeRect(-unitSize/2, -unitSize/2, unitSize, unitSize);
+    
+    // Ajouter le graphique au container
+    container.add(graphics);
+    
+    // Stocker les informations de l'unité
+    this.unitSprites.set(unitId, {
+      sprite: container,
+      targetX: unit.x,
+      targetY: unit.y,
+      nameText: undefined // Nous n'utilisons plus de texte pour les unités
+    });
+  }
+
+  // Obtenir une version plus foncée d'une couleur pour le contour
+  private getDarkerColor(color: number): number {
+    const r = (color >> 16) & 0xFF;
+    const g = (color >> 8) & 0xFF;
+    const b = color & 0xFF;
+    
+    // Réduire chaque composante de 40%
+    const darkerR = Math.max(0, Math.floor(r * 0.6));
+    const darkerG = Math.max(0, Math.floor(g * 0.6));
+    const darkerB = Math.max(0, Math.floor(b * 0.6));
+    
+    return (darkerR << 16) | (darkerG << 8) | darkerB;
+  }
+
+  // Mettre à jour la position du texte du nom de l'unité
+  private updateUnitNamePosition(unitId: string) {
+    // Cette méthode ne fait plus rien car nous n'avons plus de texte pour les unités
+    // Mais elle est conservée pour compatibilité avec le code existant
+  }
+
+  // Ajouter cette méthode pour mettre à jour les unités
+  private updateUnits(delta: number) {
+    // Parcourir toutes les unités
+    this.unitSprites.forEach((unitData, unitId) => {
+      if (unitData.targetX !== undefined && unitData.targetY !== undefined) {
+        // Vérifier si c'est un joueur ou une unité
+        const isPlayer = this.room && this.room.state && this.room.state.players.has(unitId);
+        
+        // Calculer le facteur d'interpolation basé sur delta pour des mouvements constants
+        // Pour les unités: utiliser un facteur plus doux (0.8 au lieu de 1.5)
+        const lerpFactor = Math.min(this.LERP_FACTOR * delta / 16 * (isPlayer ? 1 : 0.8), 1);
+        
+        // Position actuelle
+        const currentX = unitData.sprite.x;
+        const currentY = unitData.sprite.y;
+        
+        // Distance à parcourir
+        const distToTarget = Phaser.Math.Distance.Between(currentX, currentY, unitData.targetX, unitData.targetY);
+        
+        // Utiliser une fonction d'easing pour un mouvement plus fluide
+        // Fonction easeInOutQuad pour une accélération et décélération progressives
+        const easeInOutQuad = (t: number): number => {
+          return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+        };
+        
+        // Appliquer l'easing au facteur d'interpolation pour des mouvements plus naturels
+        const easedFactor = easeInOutQuad(lerpFactor);
+        
+        // Utiliser l'interpolation linéaire avec le facteur modifié par l'easing
+        const newX = Phaser.Math.Linear(currentX, unitData.targetX, easedFactor);
+        const newY = Phaser.Math.Linear(currentY, unitData.targetY, easedFactor);
+        
+        // Mettre à jour la position du container
+        unitData.sprite.setPosition(newX, newY);
+        
+        // Animation de marche seulement pour les unités (pas pour les joueurs)
+        if (!isPlayer) {
+          const unitRect = unitData.sprite.getAt(0) as Phaser.GameObjects.Rectangle;
+          
+          if (unitRect) {
+            // Réduire le seuil de distance pour que l'animation ne s'active que si l'unité bouge réellement
+            // Était 0.5 pixels, maintenant 0.2 pixels pour plus de stabilité
+            if (distToTarget > 0.2) {
+              // Oscillation de la rotation pour simuler la marche
+              if (!unitData.walkingPhase) {
+                unitData.walkingPhase = 0;
+              }
+              
+              // Réduire la vitesse d'oscillation pour un effet plus naturel
+              unitData.walkingPhase += delta * 0.007; // Était 0.01
+              
+              // Appliquer une légère rotation sinusoïdale pour simuler la marche
+              // Réduire l'amplitude de 0.05 à 0.03 pour une oscillation plus subtile
+              const walkAngle = Math.sin(unitData.walkingPhase) * 0.03;
+              unitRect.setRotation(walkAngle);
+            } else {
+              // Stabiliser la rotation quand immobile
+              unitRect.setRotation(0);
+            }
+          }
+        }
+      }
+    });
+  }
+
+  // Nouvelle méthode pour vérifier la synchronisation entre les unités locales et serveur
+  private checkUnitSynchronization() {
+    if (!this.room || !this.room.state) return;
+    
+    console.log("Vérification de la synchronisation des unités...");
+    
+    // Collecter les IDs des unités serveur et des joueurs
+    const serverUnitIds = new Set<string>();
+    const serverPlayerIds = new Set<string>();
+    
+    // Ajouter toutes les unités du serveur
+    this.room.state.units.forEach((unit, unitId) => {
+      serverUnitIds.add(unitId);
+    });
+    
+    // Ajouter tous les joueurs du serveur
+    this.room.state.players.forEach((player, playerId) => {
+      serverPlayerIds.add(playerId);
+    });
+    
+    // Vérifier si des unités locales n'existent pas sur le serveur
+    let ghostUnitsCount = 0;
+    this.unitSprites.forEach((unitData, unitId) => {
+      // Vérifier si l'ID est celui d'un joueur (les sessionIds sont généralement courts)
+      const isPlayer = serverPlayerIds.has(unitId);
+      
+      // Ne pas traiter les sprites des joueurs
+      if (isPlayer) {
+        return; // Ignorer les joueurs dans cette vérification
+      }
+      
+      // Si cette unité n'existe pas sur le serveur
+      if (!serverUnitIds.has(unitId)) {
+        ghostUnitsCount++;
+        console.log(`Unité fantôme détectée: ${unitId} - Suppression`);
+        
+        // Supprimer le sprite et le texte
+        unitData.sprite.destroy();
+        if (unitData.nameText) {
+          unitData.nameText.destroy();
+        }
+        
+        // Supprimer de notre Map
+        this.unitSprites.delete(unitId);
+      }
+    });
+    
+    if (ghostUnitsCount > 0) {
+      console.log(`${ghostUnitsCount} unités fantômes supprimées`);
+    } else {
+      console.log("Aucune unité fantôme détectée");
+    }
+  }
+
+  // Nouvelle méthode pour animer le cooldown visuellement
+  private startCooldownAnimation(button: Phaser.GameObjects.Text, duration: number) {
+    // Assombrir le bouton pendant le cooldown
+    button.setAlpha(0.5);
+    
+    // Animation progressive de retour à l'alpha normal
+    this.tweens.add({
+      targets: button,
+      alpha: 1,
+      duration: duration,
+      ease: 'Linear'
+    });
+  }
+
+  // Nouvelle méthode pour diagnostiquer l'état des joueurs et unités
+  private logEntitiesStatus() {
+    if (!this.room || !this.room.state) return;
+    
+    console.log("======== DIAGNOSTIC DES ENTITÉS ========");
+    
+    // Compter les joueurs côté serveur
+    let serverPlayerCount = 0;
+    this.room.state.players.forEach(() => serverPlayerCount++);
+    
+    // Compter les unités côté serveur
+    let serverUnitCount = 0;
+    this.room.state.units.forEach(() => serverUnitCount++);
+    
+    // Compter les sprites de joueurs et d'unités côté client
+    let clientPlayerCount = 0;
+    let clientUnitCount = 0;
+    
+    // Collecter les IDs des joueurs du serveur
+    const serverPlayerIds = new Set<string>();
+    this.room.state.players.forEach((player, playerId) => {
+      serverPlayerIds.add(playerId);
+    });
+    
+    // Parcourir les sprites pour identifier joueurs vs unités
+    this.unitSprites.forEach((data, id) => {
+      if (serverPlayerIds.has(id)) {
+        clientPlayerCount++;
+      } else {
+        clientUnitCount++;
+      }
+    });
+    
+    console.log(`Côté serveur: ${serverPlayerCount} joueurs, ${serverUnitCount} unités`);
+    console.log(`Côté client: ${clientPlayerCount} joueurs, ${clientUnitCount} unités`);
+    console.log(`Total sprites: ${this.unitSprites.size}`);
+    
+    // Vérifier si des joueurs sont manquants
+    const missingPlayers: string[] = [];
+    serverPlayerIds.forEach(id => {
+      if (!this.unitSprites.has(id) && id !== this.room.sessionId) {
+        missingPlayers.push(id);
+        
+        // Récupérer les données du joueur manquant et recréer son sprite
+        const player = this.room.state.players.get(id);
+        if (player) {
+          console.log(`Recréation du sprite pour le joueur ${id}`);
+          this.createPlayerSprite(player, id);
+        }
+      }
+    });
+    
+    if (missingPlayers.length > 0) {
+      console.warn(`ATTENTION: ${missingPlayers.length} joueurs manquants côté client ont été restaurés:`, missingPlayers);
+    } else {
+      console.log("Tous les joueurs du serveur sont présents côté client");
+    }
+    
+    console.log("========================================");
   }
 } 
