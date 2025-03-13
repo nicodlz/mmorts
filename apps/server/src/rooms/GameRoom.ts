@@ -344,12 +344,12 @@ export class GameRoom extends Room<GameState> {
 
     // Initialiser les ressources du joueur
     player.resources = new MapSchema<number>();
-    player.resources.set(ResourceType.WOOD, 0);
-    player.resources.set(ResourceType.STONE, 0);
-    player.resources.set(ResourceType.GOLD, 0);
-    player.resources.set(ResourceType.IRON, 0);
-    player.resources.set(ResourceType.COAL, 0);
-    player.resources.set(ResourceType.STEEL, 0);
+    player.resources.set(ResourceType.WOOD, 10000);
+    player.resources.set(ResourceType.STONE, 10000);
+    player.resources.set(ResourceType.GOLD, 10000);
+    player.resources.set(ResourceType.IRON, 10000);
+    player.resources.set(ResourceType.COAL, 10000);
+    player.resources.set(ResourceType.STEEL, 10000);
     
     // Définir la population initiale à 1 au lieu de 0
     player.population = 1;
