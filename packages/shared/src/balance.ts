@@ -42,10 +42,10 @@ export const COMBAT = {
 
 // Quantités de ressources données au joueur lors de sa création
 export const PLAYER_STARTING_RESOURCES = {
-  [ResourceType.WOOD]: 50,
-  [ResourceType.STONE]: 50,
-  [ResourceType.GOLD]: 50,
-  [ResourceType.IRON]: 50,
+  [ResourceType.WOOD]: 0,
+  [ResourceType.STONE]: 0,
+  [ResourceType.GOLD]: 0,
+  [ResourceType.IRON]: 0,
   [ResourceType.COAL]: 0,
   [ResourceType.STEEL]: 0
 };
@@ -88,8 +88,8 @@ export const MINING_CONFIG = {
   PHASE_SPEED: 150, // ms par phase d'animation
   RESOURCE_AMOUNTS: {
     [ResourceType.GOLD]: 100,
-    [ResourceType.WOOD]: 20,
-    [ResourceType.STONE]: 50,
+    [ResourceType.WOOD]: 10,
+    [ResourceType.STONE]: 20,
   },
 };
 

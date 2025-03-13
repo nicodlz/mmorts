@@ -9,7 +9,8 @@ import {
   CHUNK_SIZE,
   ResourceType,
   BUILDING_COSTS,
-  BuildingType
+  BuildingType,
+  HARVEST_AMOUNT  // Ajouter l'importation ici
 } from 'shared';
 
 export class GameScene extends Phaser.Scene {
@@ -2794,17 +2795,7 @@ export class GameScene extends Phaser.Scene {
     if (amount <= 0) return;
     
     // Récupérer la quantité qui sera récoltée pour ce type de ressource
-    // Ces valeurs devraient correspondre à celles définies dans HARVEST_AMOUNT
-    const harvestAmounts = {
-      gold: 3,
-      wood: 3,
-      stone: 3,
-      iron: 0,
-      coal: 0,
-      steel: 0
-    };
-    
-    const harvestAmount = harvestAmounts[resource.type] || 1;
+    const harvestAmount = HARVEST_AMOUNT[resource.type as ResourceType] || 1;
     
     // Envoyer un message au serveur pour récolter
     if (this.room) {
