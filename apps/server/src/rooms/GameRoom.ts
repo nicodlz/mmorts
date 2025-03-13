@@ -174,9 +174,9 @@ export class GameRoom extends Room<GameState> {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
       
-      // Vérifier que le joueur a assez de ressources (10 or, 10 fer)
-      const goldCost = 10;
-      const ironCost = 10;
+      // Vérifier que le joueur a assez de ressources (2 or, 2 fer)
+      const goldCost = 2;
+      const ironCost = 2;
       
       if ((player.resources.get(ResourceType.GOLD) || 0) < goldCost || 
           (player.resources.get(ResourceType.IRON) || 0) < ironCost) {
