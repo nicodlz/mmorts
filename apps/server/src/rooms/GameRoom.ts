@@ -59,8 +59,8 @@ export class GameRoom extends Room<GameState> {
       outputs: { [ResourceType.COAL]: 1 }
     },
     [BuildingType.FORGE]: {
-      inputs: { [ResourceType.STONE]: 5 },
-      outputs: { [ResourceType.IRON]: 1 }
+      inputs: { [ResourceType.STONE]: 3 },
+      outputs: { [ResourceType.IRON]: 2 }
     },
     [BuildingType.FACTORY]: {
       inputs: { [ResourceType.COAL]: 3, [ResourceType.IRON]: 3 },

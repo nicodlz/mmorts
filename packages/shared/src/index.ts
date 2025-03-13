@@ -50,8 +50,8 @@ export class PlayerSchema extends Schema {
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") rotation: number = 0;
-  @type("number") health: number = 100;
-  @type("number") maxHealth: number = 100;
+  @type("number") health: number = 300;
+  @type("number") maxHealth: number = 300;
   @type("number") population: number = 0;
   @type("number") maxPopulation: number = 0;
   @type("string") tool: string = "pickaxe";

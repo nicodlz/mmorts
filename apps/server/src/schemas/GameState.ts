@@ -20,8 +20,8 @@ export class PlayerSchema extends Schema {
   @type("string") name: string = "Player";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
-  @type("number") health: number = 200;
-  @type("number") maxHealth: number = 200;
+  @type("number") health: number = 600;
+  @type("number") maxHealth: number = 600;
   @type("number") hue: number = 0;
   @type("number") population: number = 0;
   @type("number") maxPopulation: number = 10;
