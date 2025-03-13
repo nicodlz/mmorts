@@ -9,12 +9,15 @@ import { loadMap } from "./world/worldManager";
 const port = Number(process.env.PORT || 2567);
 const app = express();
 
-// Configuration CORS plus permissive pour le développement
+// Configuration CORS plus permissive
 app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST"],
-  credentials: true
+  origin: true, // Permet toutes les origines
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
+  credentials: true,
+  maxAge: 86400 // Cache pour 24 heures
 }));
+
 app.use(express.json());
 
 // Monitoring route
@@ -29,6 +32,12 @@ console.log("Monde initialisé avec succès!");
 const server = createServer(app);
 const gameServer = new Server({
   server,
+  presence: true,
+  transport: {
+    pingInterval: 5000,
+    pingMaxRetries: 3,
+    allowedOrigins: "*" // Permet toutes les origines pour WebSocket
+  }
 });
 
 // Register game room with world data
