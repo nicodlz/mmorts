@@ -31,9 +31,9 @@ gameServer.define("game_room", GameRoom, { worldData })
   .enableRealtimeListing();
 
 // Start server
-gameServer.listen(port).then(() => {
-  console.log(`🚀 Server started on http://localhost:${port}`);
-  console.log(`🎮 Colyseus monitor available at http://localhost:${port}/colyseus`);
+gameServer.listen(port, "0.0.0.0").then(() => {
+  console.log(`🚀 Server started on http://0.0.0.0:${port}`);
+  console.log(`🎮 Colyseus monitor available at http://0.0.0.0:${port}/colyseus`);
 }).catch(err => {
   console.error(err);
   process.exit(1);

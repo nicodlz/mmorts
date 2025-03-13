@@ -155,6 +155,17 @@ export class GameScene extends Phaser.Scene {
   private longPressTarget: { x: number, y: number } | null = null;
   private readonly LONG_PRESS_THRESHOLD: number = 200; // Millisecondes avant qu'un clic soit considéré comme prolongé
   
+  // Nouveaux éléments pour le système de combat
+  private healthBar?: Phaser.GameObjects.Graphics;
+  private unitHealthBars: Map<string, Phaser.GameObjects.Graphics> = new Map();
+  private deathScreen?: Phaser.GameObjects.Container;
+  private respawnCountdown?: Phaser.GameObjects.Text;
+  private damageTint?: Phaser.GameObjects.Rectangle;
+  private isPlayerDead: boolean = false;
+  
+  // Ajouter cette propriété à la classe
+  private respawnIntervalId?: number;
+  
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
@@ -491,6 +502,12 @@ export class GameScene extends Phaser.Scene {
     // Initialiser les variables pour la sélection de bâtiment
     this.selectedBuilding = null;
     this.destroyButton = null;
+    
+    // Initialiser les systèmes et l'interface utilisateur
+    this.createResourcesUI();
+    
+    // Supprimer toutes les barres de vie des unités
+    this.clearAllUnitHealthBars();
   }
   
   update(time: number, delta: number) {
@@ -630,10 +647,16 @@ export class GameScene extends Phaser.Scene {
         }
       }
     }
+    
+    // Vérification de sécurité pour l'écran de mort
+    if (!this.isPlayerDead && this.deathScreen) {
+      console.log("Anomalie détectée: écran de mort présent alors que le joueur n'est pas mort. Nettoyage forcé.");
+      this.hideDeathScreen();
+    }
   }
   
   // Configuration simplifiée des gestionnaires réseau Colyseus
-  private setupNetworkHandlers() {
+  private setupNetworkHandlers(): void {
     if (!this.room) return;
     
     // Gestionnaire pour l'état initial du joueur
@@ -721,6 +744,139 @@ export class GameScene extends Phaser.Scene {
       }
     });
     
+    // Écouter les dégâts subis par les unités
+    this.room.onMessage("unitDamaged", (data: any) => {
+      console.log("Unité endommagée:", data);
+      
+      // Ne plus mettre à jour la barre de vie
+      // this.updateUnitHealthBar(data.unitId, data.health, data.maxHealth);
+      
+      // Montrer l'effet de dégâts
+      const unitData = this.unitSprites.get(data.unitId);
+      if (unitData) {
+        this.showDamageEffect(unitData.sprite.x, unitData.sprite.y, data.damage);
+        
+        // Effet de recul léger (secousse)
+        this.addContainerShakeEffect(unitData.sprite, 0.5);
+      }
+    });
+    
+    // Écouter les dégâts subis par le joueur
+    this.room.onMessage("playerDamaged", (data: any) => {
+      console.log("Joueur endommagé:", data);
+      
+      // Mise à jour de la barre de vie du joueur
+      if (data.health !== undefined && data.maxHealth !== undefined) {
+        this.updatePlayerHealthBar(data.health, data.maxHealth);
+      } else {
+        console.warn("Données de santé manquantes dans playerDamaged:", data);
+      }
+      
+      // Effet visuel de dégâts
+      this.showPlayerDamageEffect(data.damage);
+      
+      // Alerte de santé critique si besoin (moins de 30% de santé)
+      if (data.health < data.maxHealth * 0.3) {
+        this.showCriticalHealthWarning();
+      }
+    });
+    
+    // Écouter la mort d'une unité
+    this.room.onMessage("unitKilled", (data: any) => {
+      console.log("Unité tuée:", data);
+      
+      // Obtenir l'unité avant qu'elle ne soit supprimée
+      const unitData = this.unitSprites.get(data.unitId);
+      if (unitData) {
+        // Effet de disparition
+        this.tweens.add({
+          targets: unitData.sprite,
+          alpha: 0,
+          y: unitData.sprite.y - 10,
+          duration: 500,
+          ease: 'Power2',
+          onComplete: () => {
+            // La suppression réelle est gérée par le handler de suppression d'unité
+          }
+        });
+        
+        // Supprimer aussi le texte du nom si présent
+        if (unitData.nameText) {
+          unitData.nameText.destroy();
+        }
+      }
+      
+      // Nettoyer les barres de vie - n'est plus nécessaire, mais gardé par sécurité
+      const healthBar = this.unitHealthBars.get(data.unitId);
+      if (healthBar) {
+        healthBar.destroy();
+        this.unitHealthBars.delete(data.unitId);
+      }
+    });
+    
+    // Écouter la mort du joueur
+    this.room.onMessage("playerDied", (message) => {
+      console.log("Joueur mort:", message);
+      
+      // Marquer le joueur comme mort
+      this.isPlayerDead = true;
+      
+      // Afficher l'écran de mort avec la durée en millisecondes
+      this.showDeathScreen(message.respawnTimeMs);
+      
+      // Désactiver les contrôles du joueur
+      this.disablePlayerControls();
+    });
+    
+    // Écouter le respawn du joueur
+    this.room.onMessage("playerRespawned", (message) => {
+      console.log("Joueur respawn:", message);
+      
+      // Réinitialiser l'état du joueur
+      this.isPlayerDead = false;
+      
+      // S'assurer que la teinte rouge est réinitialisée
+      if (this.damageTint) {
+        this.damageTint.setAlpha(0);
+        console.log("Teinte rouge réinitialisée lors du respawn");
+      }
+      
+      // Vérifier s'il y a un intervalle de compte à rebours en cours et le supprimer
+      if (this.respawnCountdown) {
+        // Arrêter tout intervalle qui pourrait être en cours pour le compte à rebours
+        // Ce n'est pas idéal car nous n'avons pas accès à l'ID de l'intervalle spécifique
+        // mais c'est une façon de s'assurer que tout intervalle potentiel est arrêté
+        this.respawnCountdown.setText("Respawn en cours...");
+      }
+      
+      // Cacher l'écran de mort
+      this.hideDeathScreen();
+      
+      // Réactiver les contrôles
+      this.enablePlayerControls();
+      
+      // Mettre à jour la position du joueur
+      if (this.player) {
+        // Important: mettre à jour aussi les positions réelles en subpixels
+        this.actualX = message.x;
+        this.actualY = message.y;
+        // Mettre à jour aussi la dernière position connue pour éviter une synchronisation immédiate
+        this.lastPlayerX = message.x;
+        this.lastPlayerY = message.y;
+        
+        this.player.setPosition(message.x, message.y);
+        this.cameras.main.centerOn(message.x, message.y);
+      }
+      
+      // Mettre à jour la barre de vie si l'information est disponible
+      if (message.health !== undefined && message.maxHealth !== undefined) {
+        this.updatePlayerHealthBar(message.health, message.maxHealth);
+      }
+      
+      // Effet visuel de réapparition
+      this.showRespawnEffect();
+    });
+    
     // Écouter les mises à jour de ressources
     this.room.onMessage("resourceUpdate", (message) => {
       console.log("Mise à jour de ressource:", message);
@@ -733,12 +889,121 @@ export class GameScene extends Phaser.Scene {
       }
     });
     
+    // Écouter quand un autre joueur meurt
+    this.room.onMessage("otherPlayerDied", (message) => {
+      console.log("Autre joueur mort:", message);
+      
+      // Récupérer le sprite du joueur
+      const playerData = this.unitSprites.get(message.sessionId);
+      if (playerData) {
+        // Effet de disparition pour le joueur mort
+        this.tweens.add({
+          targets: playerData.sprite,
+          alpha: 0.3, // Rendre semi-transparent plutôt que de disparaître complètement
+          y: playerData.sprite.y - 5,
+          duration: 500,
+          ease: 'Power2'
+        });
+        
+        // Marquer le joueur comme mort dans nos données
+        playerData.sprite.setData('isDead', true);
+        
+        // Ajouter effet visuel "MORT" au-dessus du joueur
+        const deadText = this.add.text(
+          playerData.sprite.x,
+          playerData.sprite.y - 30,
+          "MORT",
+          {
+            fontSize: '12px',
+            color: '#ff0000',
+            stroke: '#000000',
+            strokeThickness: 2
+          }
+        );
+        deadText.setOrigin(0.5);
+        deadText.setDepth(15); // Au-dessus du joueur
+        
+        // Attacher le texte au joueur pour qu'il bouge avec lui
+        playerData.sprite.setData('deadText', deadText);
+      }
+    });
+    
+    // Écouter quand un autre joueur réapparaît
+    this.room.onMessage("otherPlayerRespawned", (message) => {
+      console.log("Autre joueur réapparu:", message);
+      
+      // Récupérer le sprite du joueur
+      const playerData = this.unitSprites.get(message.sessionId);
+      if (playerData) {
+        // Réinitialiser les propriétés visuelles
+        this.tweens.add({
+          targets: playerData.sprite,
+          alpha: 1, // Rétablir l'opacité normale
+          y: message.y, // Mettre à jour la position
+          duration: 500,
+          ease: 'Power2'
+        });
+        
+        // Mettre à jour la position cible
+        playerData.targetX = message.x;
+        playerData.targetY = message.y;
+        
+        // Marquer le joueur comme vivant
+        playerData.sprite.setData('isDead', false);
+        
+        // Récupérer et supprimer le texte "MORT" s'il existe
+        const deadText = playerData.sprite.getData('deadText');
+        if (deadText) {
+          console.log("Suppression du texte MORT pour le joueur", message.sessionId);
+          if (deadText.destroy) {
+            deadText.destroy();
+          }
+          // S'assurer que la référence est également supprimée
+          playerData.sprite.setData('deadText', null);
+        } else {
+          console.log("Aucun texte MORT trouvé pour le joueur", message.sessionId);
+          
+          // Recherche dans les enfants de la scène pour trouver d'éventuels textes MORT orphelins
+          this.children.list.forEach(child => {
+            if (child instanceof Phaser.GameObjects.Text && 
+                child.text === "MORT" && 
+                Math.abs(child.x - playerData.sprite.x) < 50 && 
+                Math.abs(child.y - playerData.sprite.y - 30) < 50) {
+              console.log("Texte MORT orphelin trouvé et supprimé");
+              child.destroy();
+            }
+          });
+        }
+        
+        // Effet de réapparition
+        const respawnEffect = this.add.particles(message.x, message.y, 'spark', {
+          lifespan: 1000,
+          speed: { min: 30, max: 70 },
+          scale: { start: 0.2, end: 0 },
+          quantity: 20,
+          blendMode: 'ADD'
+        });
+        
+        // Supprimer l'effet après un court délai
+        this.time.delayedCall(1000, () => {
+          if (respawnEffect) respawnEffect.destroy();
+        });
+      }
+    });
+    
     this.room.onMessage("playerLeft", (message) => {
       console.log("Message playerLeft reçu:", message);
       
       // Supprimer le sprite du joueur qui part
       const playerData = this.unitSprites.get(message.sessionId);
       if (playerData) {
+        // Supprimer le texte MORT si le joueur était mort
+        const deadText = playerData.sprite.getData('deadText');
+        if (deadText && deadText.destroy) {
+          deadText.destroy();
+        }
+        
+        // Suppression du sprite du joueur et de son nom
         playerData.sprite.destroy();
         if (playerData.nameText) {
           playerData.nameText.destroy();
@@ -1476,7 +1741,7 @@ export class GameScene extends Phaser.Scene {
         name,
         {
           fontSize: '8px',
-          fontFamily: 'Arial, sans-serif',
+          fontFamily: 'Arial, sans-serif', 
           color: '#ffffff',
           stroke: '#000000',
           strokeThickness: 2,
@@ -1506,6 +1771,9 @@ export class GameScene extends Phaser.Scene {
   private handlePlayerMovement() {
     // Vérifie si le joueur et le contrôle clavier sont initialisés
     if (!this.player || !this.cursors || !this.wasdKeys) return;
+    
+    // Ignorer les mouvements si le joueur est mort
+    if (this.isPlayerDead) return;
     
     // Priorité aux entrées clavier sur les mouvements réseau
     if (!this.cursors.left.isDown && !this.cursors.right.isDown && 
@@ -1753,6 +2021,16 @@ export class GameScene extends Phaser.Scene {
       
       const { sprite, targetX, targetY, nameText } = data;
       
+      // Ignorer les mises à jour de position pour les joueurs morts
+      if (sprite.getData('isDead') === true) {
+        // Mettre à jour uniquement la position du texte "MORT" si présent
+        const deadText = sprite.getData('deadText');
+        if (deadText && deadText.setPosition) {
+          deadText.setPosition(sprite.x, sprite.y - 30);
+        }
+        return;
+      }
+      
       // Calculer le facteur d'interpolation basé sur delta pour des mouvements constants
       const lerpFactor = Math.min(this.LERP_FACTOR * delta / 16, 1);
       
@@ -1770,6 +2048,9 @@ export class GameScene extends Phaser.Scene {
   // Synchroniser la position avec le serveur
   private synchronizePlayerPosition() {
     if (!this.room) return;
+    
+    // Ne pas synchroniser si le joueur est mort
+    if (this.isPlayerDead) return;
     
     // Envoyer les coordonnées actuelles (précises) au serveur
     console.log(`Envoi position au serveur: (${this.actualX}, ${this.actualY})`);
@@ -2684,38 +2965,73 @@ export class GameScene extends Phaser.Scene {
     return effect;
   }
   
-  // Ajouter un petit effet de secousse à un sprite
+  // Shake effect pour un sprite
   private addShakeEffect(sprite: Phaser.GameObjects.Sprite, intensity: number = 1) {
-    // Sauvegarder la position originale
+    if (!sprite) return;
+    
     const originalX = sprite.x;
     const originalY = sprite.y;
+    const shakeDistance = 2 * intensity;
     
-    // Réduire l'intensité de vibration
-    const offset = intensity;
-    
-    // Créer une séquence de secousse
-    const shakeSequence = [
-      { x: offset, y: 0 },
-      { x: 0, y: offset },
-      { x: -offset, y: 0 },
-      { x: 0, y: -offset },
-      { x: 0, y: 0 }
-    ];
-    
-    // Fonction pour créer un tween
+    // Créer 5 tweens consécutifs pour l'effet de secousse
     const createNextTween = (index: number) => {
-      if (index >= shakeSequence.length) return;
+      if (index >= 5) {
+        // Position d'origine à la fin
+        this.tweens.add({
+          targets: sprite,
+          x: originalX,
+          y: originalY,
+          duration: 50,
+          ease: 'Power1'
+        });
+        return;
+      }
       
-      const shake = shakeSequence[index];
+      // Créer un mouvement aléatoire
       this.tweens.add({
         targets: sprite,
-        x: originalX + shake.x,
-        y: originalY + shake.y,
-        duration: 25,
+        x: originalX + (Math.random() - 0.5) * 2 * shakeDistance,
+        y: originalY + (Math.random() - 0.5) * 2 * shakeDistance,
+        duration: 50,
         ease: 'Power1',
-        onComplete: () => {
-          createNextTween(index + 1);
-        }
+        onComplete: () => createNextTween(index + 1)
+      });
+    };
+    
+    // Démarrer la séquence
+    createNextTween(0);
+  }
+  
+  // Shake effect pour un Container (utilisé pour les unités)
+  private addContainerShakeEffect(container: Phaser.GameObjects.Container, intensity: number = 1) {
+    if (!container) return;
+    
+    const originalX = container.x;
+    const originalY = container.y;
+    const shakeDistance = 2 * intensity;
+    
+    // Créer 5 tweens consécutifs pour l'effet de secousse
+    const createNextTween = (index: number) => {
+      if (index >= 5) {
+        // Position d'origine à la fin
+        this.tweens.add({
+          targets: container,
+          x: originalX,
+          y: originalY,
+          duration: 50,
+          ease: 'Power1'
+        });
+        return;
+      }
+      
+      // Créer un mouvement aléatoire
+      this.tweens.add({
+        targets: container,
+        x: originalX + (Math.random() - 0.5) * 2 * shakeDistance,
+        y: originalY + (Math.random() - 0.5) * 2 * shakeDistance,
+        duration: 50,
+        ease: 'Power1',
+        onComplete: () => createNextTween(index + 1)
       });
     };
     
@@ -3450,5 +3766,373 @@ export class GameScene extends Phaser.Scene {
     }
     
     console.log("========================================");
+  }
+  
+  // Créer une barre de vie pour une unité - désactivé
+  private updateUnitHealthBar(unitId: string, currentHealth: number, maxHealth: number) {
+    // Suppression de la barre si elle existe
+    let healthBar = this.unitHealthBars.get(unitId);
+    if (healthBar) {
+      healthBar.destroy();
+      this.unitHealthBars.delete(unitId);
+    }
+    
+    // Plus de création de barre de vie - fonctionnalité désactivée
+    return;
+  }
+  
+  // Mise à jour de la barre de vie du joueur
+  private updatePlayerHealthBar(currentHealth: number, maxHealth: number) {
+    // Si la barre n'existe pas encore, la créer
+    if (!this.healthBar) {
+      this.healthBar = this.add.graphics();
+      this.healthBar.setScrollFactor(0); // Fixe à l'écran
+      this.healthBar.setDepth(90); // Au-dessus de la plupart des éléments
+    } else {
+      this.healthBar.clear();
+    }
+    
+    // Dimensions et position de la barre
+    const width = 200;
+    const height = 10;
+    const x = 10;
+    const y = 10;
+    
+    // Calculer le pourcentage de santé
+    const healthPercentage = Math.max(0, Math.min(1, currentHealth / maxHealth));
+    
+    // Déterminer la couleur en fonction de la santé
+    const color = healthPercentage > 0.6 ? 0x00ff00 : healthPercentage > 0.3 ? 0xffff00 : 0xff0000;
+    
+    // Fond de la barre (gris foncé)
+    this.healthBar.fillStyle(0x333333, 0.8);
+    this.healthBar.fillRect(x, y, width, height);
+    
+    // Partie "remplie" de la barre
+    this.healthBar.fillStyle(color, 1);
+    this.healthBar.fillRect(x, y, width * healthPercentage, height);
+    
+    // Bordure
+    this.healthBar.lineStyle(1, 0x000000, 1);
+    this.healthBar.strokeRect(x, y, width, height);
+  }
+  
+  // Afficher un effet de dégâts à une position donnée
+  private showDamageEffect(x: number, y: number, damage: number) {
+    // Créer un texte affichant les dégâts
+    const damageText = this.add.text(x, y - 20, `-${damage}`, {
+      fontSize: '14px',
+      color: '#ff0000',
+      stroke: '#000000',
+      strokeThickness: 2
+    });
+    damageText.setOrigin(0.5);
+    
+    // Animation de "pop-up" et disparition
+    this.tweens.add({
+      targets: damageText,
+      y: y - 40, // Monter
+      alpha: 0,  // Disparaître
+      scale: 1.5, // Grossir légèrement
+      duration: 1000,
+      ease: 'Power2',
+      onComplete: () => {
+        damageText.destroy();
+      }
+    });
+  }
+  
+  // Effet de flash rouge pour les dégâts du joueur
+  private showPlayerDamageEffect(damage: number) {
+    // Si l'effet n'existe pas, le créer
+    if (!this.damageTint) {
+      this.damageTint = this.add.rectangle(
+        this.cameras.main.width / 2,
+        this.cameras.main.height / 2,
+        this.cameras.main.width,
+        this.cameras.main.height,
+        0xff0000
+      );
+      this.damageTint.setScrollFactor(0); // Fixe à l'écran
+      this.damageTint.setDepth(95); // Au-dessus de la plupart des éléments
+      this.damageTint.setAlpha(0); // Invisible par défaut
+    }
+    
+    // Animation de flash rouge
+    this.tweens.add({
+      targets: this.damageTint,
+      alpha: { from: 0.3, to: 0 }, // Apparaître puis disparaître
+      duration: 300,
+      ease: 'Power2'
+    });
+    
+    // Afficher aussi les dégâts en texte
+    const damageText = this.add.text(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 3,
+      `-${damage}`,
+      {
+        fontSize: '32px',
+        color: '#ff0000',
+        stroke: '#ffffff',
+        strokeThickness: 3
+      }
+    );
+    damageText.setScrollFactor(0);
+    damageText.setOrigin(0.5);
+    damageText.setDepth(96);
+    
+    // Animation de disparition
+    this.tweens.add({
+      targets: damageText,
+      alpha: 0,
+      y: '-=50',
+      scale: 1.5,
+      duration: 1000,
+      ease: 'Power2',
+      onComplete: () => {
+        damageText.destroy();
+      }
+    });
+  }
+  
+  // Alerte de santé critique
+  private showCriticalHealthWarning() {
+    // Ne rien faire si le joueur est déjà mort
+    if (this.isPlayerDead) return;
+    
+    // Effet de battement rouge sur tout l'écran
+    if (!this.damageTint) {
+      this.showPlayerDamageEffect(0); // Créer le tint si nécessaire
+    }
+    
+    // Animation de battement répété
+    this.tweens.add({
+      targets: this.damageTint,
+      alpha: 0.2,
+      yoyo: true,
+      repeat: 5,
+      duration: 400,
+      ease: 'Sine.easeInOut'
+    });
+    
+    // Message d'alerte en texte
+    const warningText = this.add.text(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 4,
+      "Santé critique!",
+      {
+        fontSize: '24px',
+        color: '#ff0000',
+        stroke: '#ffffff',
+        strokeThickness: 3
+      }
+    );
+    warningText.setScrollFactor(0);
+    warningText.setOrigin(0.5);
+    warningText.setDepth(96);
+    
+    // Animation de disparition
+    this.tweens.add({
+      targets: warningText,
+      alpha: 0,
+      duration: 2000,
+      delay: 1000,
+      ease: 'Power2',
+      onComplete: () => {
+        warningText.destroy();
+      }
+    });
+  }
+  
+  // Afficher l'écran de mort
+  private showDeathScreen(respawnTimeMs: number) {
+    // Nettoyer tout écran de mort précédent si nécessaire
+    if (this.deathScreen) {
+      this.hideDeathScreen();
+    }
+    
+    // Arrêter tout intervalle existant
+    if (this.respawnIntervalId) {
+      clearInterval(this.respawnIntervalId);
+      this.respawnIntervalId = undefined;
+    }
+    
+    // Créer un conteneur pour l'écran de mort
+    this.deathScreen = this.add.container(0, 0);
+    this.deathScreen.setDepth(100); // Au-dessus de tout
+    this.deathScreen.setScrollFactor(0); // Fixe à l'écran
+    
+    // Fond semi-transparent
+    const overlay = this.add.rectangle(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 2,
+      this.cameras.main.width,
+      this.cameras.main.height,
+      0x000000,
+      0.7
+    );
+    
+    // Texte "Vous êtes mort"
+    const deathText = this.add.text(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 3,
+      "Vous êtes mort",
+      {
+        fontSize: '48px',
+        color: '#ff0000',
+        stroke: '#000000',
+        strokeThickness: 4
+      }
+    );
+    deathText.setOrigin(0.5);
+    
+    // Calculer le temps restant initial en secondes
+    let remainingSeconds = Math.ceil(respawnTimeMs / 1000);
+    
+    // Texte du compte à rebours
+    this.respawnCountdown = this.add.text(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 2,
+      `Respawn dans: ${remainingSeconds}`,
+      {
+        fontSize: '32px',
+        color: '#ffffff',
+        stroke: '#000000',
+        strokeThickness: 3
+      }
+    );
+    this.respawnCountdown.setOrigin(0.5);
+    
+    // Ajouter les éléments au conteneur
+    this.deathScreen.add([overlay, deathText, this.respawnCountdown] as Phaser.GameObjects.GameObject[]);
+    
+    // Mettre à jour le compte à rebours chaque seconde
+    const updateInterval = setInterval(() => {
+      if (!this.respawnCountdown || !this.deathScreen) {
+        clearInterval(updateInterval);
+        this.respawnIntervalId = undefined;
+        return;
+      }
+      
+      remainingSeconds--;
+      
+      if (remainingSeconds <= 0) {
+        this.respawnCountdown.setText("Respawn imminent...");
+        clearInterval(updateInterval);
+        this.respawnIntervalId = undefined;
+      } else {
+        this.respawnCountdown.setText(`Respawn dans: ${remainingSeconds}`);
+      }
+    }, 1000);
+    
+    // Stocker l'ID de l'intervalle pour pouvoir l'arrêter plus tard
+    this.respawnIntervalId = updateInterval as unknown as number;
+  }
+  
+  // Cacher l'écran de mort
+  private hideDeathScreen() {
+    // Arrêter l'intervalle de compte à rebours
+    if (this.respawnIntervalId) {
+      clearInterval(this.respawnIntervalId);
+      this.respawnIntervalId = undefined;
+    }
+    
+    if (this.deathScreen) {
+      // Supprimer directement sans animation pour éviter les problèmes
+      this.deathScreen.destroy();
+      this.deathScreen = undefined;
+      this.respawnCountdown = undefined;
+      
+      console.log("Écran de mort supprimé immédiatement");
+    }
+    
+    // Réinitialiser la teinte rouge si elle existe
+    if (this.damageTint) {
+      this.damageTint.setAlpha(0);
+      console.log("Teinte rouge réinitialisée à alpha 0");
+    }
+  }
+  
+  // Effet de réapparition
+  private showRespawnEffect() {
+    // Réinitialiser la teinte rouge si elle existe pour s'assurer qu'elle disparaît
+    if (this.damageTint) {
+      this.damageTint.setAlpha(0);
+    }
+    
+    // Flash blanc
+    const whiteFlash = this.add.rectangle(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 2,
+      this.cameras.main.width,
+      this.cameras.main.height,
+      0xffffff
+    );
+    whiteFlash.setScrollFactor(0);
+    whiteFlash.setDepth(90);
+    
+    // Animation de disparition du flash
+    this.tweens.add({
+      targets: whiteFlash,
+      alpha: 0,
+      duration: 1000,
+      ease: 'Power2',
+      onComplete: () => {
+        whiteFlash.destroy();
+      }
+    });
+    
+    // Texte "Vous êtes de retour"
+    const respawnText = this.add.text(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 3,
+      "Vous êtes de retour!",
+      {
+        fontSize: '32px',
+        color: '#ffffff',
+        stroke: '#000000',
+        strokeThickness: 3
+      }
+    );
+    respawnText.setScrollFactor(0);
+    respawnText.setOrigin(0.5);
+    respawnText.setDepth(91);
+    
+    // Animation de disparition du texte
+    this.tweens.add({
+      targets: respawnText,
+      alpha: 0,
+      y: "-=50",
+      duration: 2000,
+      ease: 'Power2',
+      onComplete: () => {
+        respawnText.destroy();
+      }
+    });
+  }
+  
+  // Désactiver les contrôles du joueur
+  private disablePlayerControls() {
+    // Désactiver les événements d'entrée
+    if (this.input.keyboard) this.input.keyboard.enabled = false;
+    this.input.enabled = false;
+  }
+  
+  // Réactiver les contrôles du joueur
+  private enablePlayerControls() {
+    // Réactiver les événements d'entrée
+    if (this.input.keyboard) this.input.keyboard.enabled = true;
+    this.input.enabled = true;
+  }
+
+  // Méthode pour supprimer toutes les barres de vie
+  private clearAllUnitHealthBars() {
+    // Détruire toutes les barres de vie existantes
+    this.unitHealthBars.forEach(healthBar => {
+      healthBar.destroy();
+    });
+    // Vider la collection
+    this.unitHealthBars.clear();
   }
 } 

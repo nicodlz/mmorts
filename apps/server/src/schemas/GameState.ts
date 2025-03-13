@@ -20,8 +20,8 @@ export class PlayerSchema extends Schema {
   @type("string") name: string = "Player";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
-  @type("number") health: number = 100;
-  @type("number") maxHealth: number = 100;
+  @type("number") health: number = 200;
+  @type("number") maxHealth: number = 200;
   @type("number") hue: number = 0;
   @type("number") population: number = 0;
   @type("number") maxPopulation: number = 10;
@@ -36,6 +36,12 @@ export class PlayerSchema extends Schema {
   @type("number") unitMoveTargetX: number = 0;
   @type("number") unitMoveTargetY: number = 0;
   @type("boolean") isMovingUnits: boolean = false;
+  
+  // Nouvelles propriétés pour le système de combat
+  @type("boolean") isDead: boolean = false;
+  @type("number") deathTime: number = 0;
+  @type("number") respawnTime: number = 0;
+  @type("boolean") isInvulnerable: boolean = false;
 }
 
 // Schéma pour une unité
@@ -46,8 +52,14 @@ export class UnitSchema extends Schema {
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") health: number = 100;
+  @type("number") maxHealth: number = 100;
   @type("number") rotation: number = 0;
   @type("boolean") isClickTargeting: boolean = false; // Indique si l'unité se déplace vers un point cliqué
+  
+  // Nouvelles propriétés pour le système de combat
+  @type("number") damage: number = 25; // Dégâts de base
+  @type("number") lastAttackTime: number = 0; // Timestamp de la dernière attaque
+  @type("string") attackTarget: string = ""; // ID de la cible actuelle
 }
 
 // Schéma pour un bâtiment

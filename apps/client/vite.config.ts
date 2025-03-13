@@ -12,13 +12,14 @@ export default defineConfig({
   server: {
     port: 3000,
     open: true,
+    host: '0.0.0.0',
     proxy: {
       '/api': {
-        target: 'http://localhost:2567',
+        target: process.env.VITE_SERVER_URL || 'http://localhost:2567',
         changeOrigin: true,
       },
       '/colyseus': {
-        target: 'ws://localhost:2567',
+        target: process.env.VITE_SERVER_URL || 'ws://localhost:2567',
         ws: true,
       },
     },

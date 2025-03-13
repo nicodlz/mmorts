@@ -344,12 +344,12 @@ export class GameRoom extends Room<GameState> {
 
     // Initialiser les ressources du joueur
     player.resources = new MapSchema<number>();
-    player.resources.set(ResourceType.WOOD, 500);
-    player.resources.set(ResourceType.STONE, 500);
-    player.resources.set(ResourceType.GOLD, 500);
-    player.resources.set(ResourceType.IRON, 500);
-    player.resources.set(ResourceType.COAL, 500);
-    player.resources.set(ResourceType.STEEL, 500);
+    player.resources.set(ResourceType.WOOD, 0);
+    player.resources.set(ResourceType.STONE, 0);
+    player.resources.set(ResourceType.GOLD, 0);
+    player.resources.set(ResourceType.IRON, 0);
+    player.resources.set(ResourceType.COAL, 0);
+    player.resources.set(ResourceType.STEEL, 0);
     
     // Définir la population initiale à 1 au lieu de 0
     player.population = 1;
@@ -419,6 +419,12 @@ export class GameRoom extends Room<GameState> {
     
     // Mettre à jour les positions des unités
     this.updateUnitPositions();
+    
+    // Mettre à jour le système de combat
+    this.updateCombat();
+    
+    // Gérer le respawn des joueurs morts
+    this.updatePlayerRespawn();
     
     // Envoyer uniquement les mises à jour aux joueurs qui ont besoin de les voir
     this.optimizeBroadcasts();
@@ -1015,6 +1021,12 @@ export class GameRoom extends Room<GameState> {
   private handlePlayerMovement(client: Client, newX: number, newY: number) {
     const player = this.state.players.get(client.sessionId);
     if (!player) return;
+    
+    // Ignorer les mouvements si le joueur est mort
+    if (player.isDead) {
+      console.log(`Mouvement ignoré pour le joueur ${client.sessionId} car il est mort`);
+      return;
+    }
 
     // Calculer les anciens et nouveaux chunks
     const oldChunkX = Math.floor(player.x / (TILE_SIZE * CHUNK_SIZE));
@@ -1043,7 +1055,7 @@ export class GameRoom extends Room<GameState> {
       // Envoyer la mise à jour des ressources au client
       client.send("updateVisibleResources", resourcesData);
     }
-
+    
     // Mettre à jour la position du joueur
     player.x = newX;
     player.y = newY;
@@ -1478,5 +1490,322 @@ export class GameRoom extends Room<GameState> {
     
     // Si toutes les vérifications sont passées, la position est valide
     return true;
+  }
+
+  // Nouvelle méthode pour gérer le respawn des joueurs
+  private updatePlayerRespawn() {
+    const now = Date.now();
+    this.state.players.forEach((player, playerId) => {
+      // Vérifier si le joueur est mort et si le temps de respawn est passé
+      if (player.isDead && now >= player.respawnTime) {
+        console.log(`Respawning player ${playerId}`); // Log pour déboguer
+        
+        // Réinitialiser le joueur
+        player.isDead = false;
+        player.health = player.maxHealth;
+        player.isInvulnerable = true;
+        
+        // Utiliser les mêmes coordonnées de spawn que lors de l'initialisation (onJoin)
+        const spawnX = 10;
+        const spawnY = 12;
+        player.x = spawnX * TILE_SIZE;
+        player.y = spawnY * TILE_SIZE;
+        
+        console.log(`Position de respawn définie : (${player.x}, ${player.y})`);
+        
+        // Notifier le client du respawn
+        const client = this.clients.find(c => c.sessionId === playerId);
+        if (client) {
+          client.send("playerRespawned", {
+            x: player.x,
+            y: player.y,
+            health: player.health,
+            maxHealth: player.maxHealth
+          });
+        }
+        
+        // Notifier tous les autres clients qu'un joueur a réapparu
+        this.broadcast("otherPlayerRespawned", {
+          sessionId: playerId,
+          x: player.x,
+          y: player.y
+        }, { except: client });
+        
+        // Planifier la fin de l'invulnérabilité
+        setTimeout(() => {
+          if (this.state.players.has(playerId)) {
+            const p = this.state.players.get(playerId);
+            if (p) p.isInvulnerable = false;
+          }
+        }, 2000); // 2 secondes d'invulnérabilité
+      }
+    });
+  }
+
+  // Nouvelle méthode pour gérer le combat
+  private updateCombat() {
+    const now = Date.now();
+    const allUnits = Array.from(this.state.units.values());
+    const allPlayers = Array.from(this.state.players.entries());
+    
+    // Créer une grille spatiale pour optimiser la détection de proximité
+    const GRID_SIZE = 100; // Taille de la cellule de la grille
+    const spatialGrid = new Map<string, UnitSchema[]>();
+    
+    // Ajouter toutes les unités à la grille spatiale
+    allUnits.forEach(unit => {
+      const gridX = Math.floor(unit.x / GRID_SIZE);
+      const gridY = Math.floor(unit.y / GRID_SIZE);
+      const gridKey = `${gridX},${gridY}`;
+      
+      if (!spatialGrid.has(gridKey)) {
+        spatialGrid.set(gridKey, []);
+      }
+      
+      spatialGrid.get(gridKey)?.push(unit);
+    });
+    
+    // Vérifier les combats potentiels pour chaque cellule de la grille
+    for (const [gridKey, unitsInCell] of spatialGrid.entries()) {
+      for (const attacker of unitsInCell) {
+        // Ignorer les unités qui ne sont pas des guerriers
+        if (attacker.type !== "warrior") continue;
+        
+        // Vérifier le cooldown d'attaque (2 fois par seconde)
+        if (now - attacker.lastAttackTime < 500) continue;
+        
+        // Vérifier si l'unité peut attaquer d'autres unités dans la même cellule
+        for (const target of unitsInCell) {
+          // Ne pas s'attaquer soi-même ou aux unités du même propriétaire
+          if (target.id === attacker.id || target.owner === attacker.owner) continue;
+          
+          // Calculer la distance
+          const distance = Math.sqrt(
+            Math.pow(attacker.x - target.x, 2) + 
+            Math.pow(attacker.y - target.y, 2)
+          );
+          
+          // Vérifier si la cible est à portée d'attaque (20 pixels)
+          if (distance <= 20) {
+            // L'unité attaque cette cible
+            this.performAttack(attacker, target, now);
+            // Une seule attaque par tick
+            break;
+          }
+        }
+        
+        // Vérifier si l'unité peut attaquer un joueur
+        let hasAttackedPlayer = false;
+        allPlayers.forEach(([playerId, player]) => {
+          // Ne pas attaquer son propre joueur
+          if (attacker.owner === playerId || hasAttackedPlayer) return;
+          
+          // Ne pas attaquer les joueurs invulnérables ou morts
+          if (player.isInvulnerable || player.isDead) return;
+          
+          // Calculer la distance au joueur
+          const distance = Math.sqrt(
+            Math.pow(attacker.x - player.x, 2) + 
+            Math.pow(attacker.y - player.y, 2)
+          );
+          
+          // Vérifier si le joueur est à portée d'attaque (20 pixels)
+          if (distance <= 20) {
+            // L'unité attaque le joueur
+            this.performPlayerAttack(attacker, player, playerId, now);
+            hasAttackedPlayer = true; // Marquer qu'une attaque a été effectuée
+          }
+        });
+      }
+    }
+  }
+  
+  // Méthode pour gérer une attaque entre unités
+  private performAttack(attacker: UnitSchema, target: UnitSchema, now: number) {
+    // Mettre à jour le temps de la dernière attaque
+    attacker.lastAttackTime = now;
+    attacker.attackTarget = target.id;
+    
+    // Calculer les dégâts de base avec une légère variation aléatoire (±10%)
+    const baseDamage = attacker.damage * (0.9 + Math.random() * 0.2);
+    
+    // Vérifier si la cible est en position défensive
+    const targetOwner = this.state.players.get(target.owner);
+    let finalDamage = baseDamage;
+    
+    // Appliquer le bonus défensif si conditions remplies
+    if (targetOwner && targetOwner.isTargetMode && !targetOwner.isMovingUnits) {
+      finalDamage *= 0.7; // Réduction de 30%
+    }
+    
+    // Arrondir les dégâts
+    finalDamage = Math.round(finalDamage);
+    
+    // Appliquer les dégâts
+    target.health -= finalDamage;
+    
+    // Limiter à 0 minimum
+    if (target.health < 0) target.health = 0;
+    
+    // Vérifier si l'unité est morte
+    if (target.health <= 0) {
+      // Supprimer l'unité
+      this.state.units.delete(target.id);
+      
+      // Mettre à jour la population du joueur
+      if (targetOwner) {
+        targetOwner.population -= 1; // Réduire la population
+      }
+      
+      // Notifier le client
+      const client = this.clients.find(c => c.sessionId === target.owner);
+      if (client) {
+        client.send("unitKilled", {
+          unitId: target.id,
+          killedBy: attacker.owner
+        });
+      }
+      
+      // Notifier aussi l'attaquant
+      const attackerClient = this.clients.find(c => c.sessionId === attacker.owner);
+      if (attackerClient) {
+        attackerClient.send("unitKilledEnemy", {
+          unitId: attacker.id,
+          enemyId: target.id
+        });
+      }
+    } else {
+      // Notifier les clients des dégâts (seulement s'ils ne sont pas morts)
+      const client = this.clients.find(c => c.sessionId === target.owner);
+      if (client) {
+        client.send("unitDamaged", {
+          unitId: target.id,
+          damage: finalDamage,
+          health: target.health,
+          maxHealth: target.maxHealth,
+          attackerId: attacker.id
+        });
+      }
+    }
+  }
+  
+  // Méthode pour gérer une attaque sur un joueur
+  private performPlayerAttack(attacker: UnitSchema, player: PlayerSchema, playerId: string, now: number) {
+    console.log(`Attaque sur joueur ${playerId} - Santé avant: ${player.health}/${player.maxHealth}`);
+    
+    // Mettre à jour le temps de la dernière attaque
+    attacker.lastAttackTime = now;
+    
+    // Les dégâts contre le joueur sont légèrement réduits
+    const baseDamage = attacker.damage * 0.8 * (0.9 + Math.random() * 0.2);
+    
+    // Appliquer le bonus défensif si conditions remplies
+    let finalDamage = baseDamage;
+    if (player.isTargetMode && !player.isMovingUnits) {
+      finalDamage *= 0.7; // Réduction de 30%
+    }
+    
+    // Arrondir les dégâts
+    finalDamage = Math.round(finalDamage);
+    console.log(`Dégâts calculés: ${finalDamage}`);
+    
+    // Appliquer les dégâts
+    player.health -= finalDamage;
+    
+    // Limiter à 0 minimum
+    if (player.health < 0) player.health = 0;
+    
+    console.log(`Santé après attaque: ${player.health}/${player.maxHealth}`);
+    
+    // Notifier le joueur des dégâts
+    const client = this.clients.find(c => c.sessionId === playerId);
+    if (client) {
+      client.send("playerDamaged", {
+        damage: finalDamage,
+        health: player.health,
+        maxHealth: player.maxHealth,
+        attackerId: attacker.id
+      });
+    } else {
+      console.log(`Client non trouvé pour le joueur ${playerId}`);
+    }
+    
+    // Vérifier si le joueur est mort
+    if (player.health <= 0 && !player.isDead) {
+      console.log(`Le joueur ${playerId} est mort`);
+      // Marquer le joueur comme mort
+      player.isDead = true;
+      player.deathTime = now;
+      
+      const respawnDelayMs = 5000; // 5 secondes
+      player.respawnTime = now + respawnDelayMs; // Respawn dans 5 secondes
+      
+      // Faire tomber une partie des ressources (30%)
+      const droppedResources = {};
+      for (const [resourceType, amount] of Object.entries(player.resources)) {
+        const amountToDrop = Math.floor(Number(amount) * 0.3); // 30% des ressources
+        if (amountToDrop > 0) {
+          droppedResources[resourceType] = amountToDrop;
+          player.resources[resourceType] -= amountToDrop;
+        }
+      }
+      
+      // Créer un drop de ressources sur la position du joueur
+      // Ceci est une simplification, vous pourriez vouloir créer des entités de ressources réelles
+      
+      // Notifier le joueur de sa mort
+      if (client) {
+        client.send("playerDied", {
+          respawnTimeMs: respawnDelayMs, // Envoyer la durée plutôt que le timestamp
+          killedBy: attacker.owner
+        });
+      }
+      
+      // Notifier tous les autres clients qu'un joueur est mort pour mettre à jour les visuels
+      this.broadcast("otherPlayerDied", {
+        sessionId: playerId,
+        killedBy: attacker.owner
+      }, { except: client });
+      
+      // Notifier le tueur
+      const killerClient = this.clients.find(c => c.sessionId === attacker.owner);
+      if (killerClient) {
+        killerClient.send("killedPlayer", {
+          victimId: playerId,
+          unitId: attacker.id
+        });
+      }
+      
+      // Supprimer toutes les unités appartenant au joueur mort
+      this.removeAllUnitsFromPlayer(playerId);
+    }
+  }
+
+  // Méthode pour supprimer toutes les unités d'un joueur
+  private removeAllUnitsFromPlayer(playerId: string) {
+    console.log(`Suppression de toutes les unités du joueur ${playerId}`);
+    
+    // Trouver toutes les unités appartenant au joueur
+    const unitsToRemove: string[] = [];
+    
+    this.state.units.forEach((unit, unitId) => {
+      if (unit.owner === playerId) {
+        unitsToRemove.push(unitId);
+      }
+    });
+    
+    // Supprimer les unités
+    unitsToRemove.forEach(unitId => {
+      console.log(`Suppression de l'unité ${unitId}`);
+      this.state.units.delete(unitId);
+      
+      // Notifier tous les clients pour qu'ils suppriment le visuel de cette unité
+      this.broadcast("unitKilled", {
+        unitId: unitId,
+        killedBy: "death" // Spécifier qu'elles sont mortes à cause de la mort du joueur
+      });
+    });
+    
+    console.log(`${unitsToRemove.length} unités ont été supprimées`);
   }
 } 
