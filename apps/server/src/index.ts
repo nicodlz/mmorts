@@ -31,13 +31,8 @@ console.log("Monde initialisé avec succès!");
 // Create HTTP & WebSocket servers
 const server = createServer(app);
 const gameServer = new Server({
-  server,
-  presence: true,
-  transport: {
-    pingInterval: 5000,
-    pingMaxRetries: 3,
-    allowedOrigins: "*" // Permet toutes les origines pour WebSocket
-  }
+  server: server,
+  // Simplifier la configuration en retirant presence et transport
 });
 
 // Register game room with world data
