@@ -9,7 +9,12 @@ import { loadMap } from "./world/worldManager";
 const port = Number(process.env.PORT || 2567);
 const app = express();
 
-app.use(cors());
+// Configuration CORS plus permissive pour le développement
+app.use(cors({
+  origin: "*",
+  methods: ["GET", "POST"],
+  credentials: true
+}));
 app.use(express.json());
 
 // Monitoring route
@@ -32,9 +37,10 @@ gameServer.define("game_room", GameRoom, { worldData })
 
 // Start server
 gameServer.listen(port, "0.0.0.0").then(() => {
-  console.log(`🚀 Server started on http://0.0.0.0:${port}`);
+  console.log(`🚀 Server started and listening on all interfaces (0.0.0.0:${port})`);
   console.log(`🎮 Colyseus monitor available at http://0.0.0.0:${port}/colyseus`);
+  console.log(`📝 CORS enabled for all origins`);
 }).catch(err => {
-  console.error(err);
+  console.error("Failed to start server:", err);
   process.exit(1);
 }); 

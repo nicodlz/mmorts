@@ -169,7 +169,9 @@ export class GameScene extends Phaser.Scene {
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
-    this.client = new Client(import.meta.env?.VITE_COLYSEUS_URL || "ws://localhost:2567");
+    const serverUrl = import.meta.env?.VITE_COLYSEUS_URL || "ws://localhost:2567";
+    console.log("Tentative de connexion au serveur:", serverUrl);
+    this.client = new Client(serverUrl);
   }
   
   preload() {
