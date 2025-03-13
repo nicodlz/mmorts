@@ -772,8 +772,9 @@ export class GameRoom extends Room<GameState> {
     // Mettre à jour le temps de dernière récolte
     resource.lastHarvestTime = now;
     
-    // Réduire la quantité de ressource disponible
-    resource.amount -= 1;
+    // Réduire la quantité de ressource disponible (3 au lieu de 1)
+    const harvestAmount = 3;
+    resource.amount = Math.max(0, resource.amount - harvestAmount);
     
     // Ajouter la ressource à l'inventaire du joueur
     // Initialiser les ressources du joueur si nécessaire
@@ -781,11 +782,11 @@ export class GameRoom extends Room<GameState> {
       player.resources = new MapSchema<number>();
     }
     
-    // Ajouter la ressource au joueur
+    // Ajouter la ressource au joueur (3 au lieu de 1)
     const currentAmount = player.resources.get(resource.type) || 0;
-    player.resources.set(resource.type, currentAmount + 1);
+    player.resources.set(resource.type, currentAmount + harvestAmount);
     
-    console.log(`Joueur ${client.sessionId} a récolté 1 ${resource.type}, total: ${currentAmount + 1}`);
+    console.log(`Joueur ${client.sessionId} a récolté ${harvestAmount} ${resource.type}, total: ${currentAmount + harvestAmount}`);
     
     // Informer le client qui a récolté
     client.send("resourceUpdate", {
@@ -795,7 +796,7 @@ export class GameRoom extends Room<GameState> {
       resourceType: resource.type,
       // Ajouter les ressources du joueur à la réponse
       playerResources: {
-        [resource.type]: currentAmount + 1
+        [resource.type]: currentAmount + harvestAmount
       }
     });
     
