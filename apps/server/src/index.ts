@@ -6,6 +6,8 @@ import { monitor } from "@colyseus/monitor";
 import { GameRoom } from "./rooms/GameRoom";
 import { loadMap } from "./world/worldManager";
 
+// Déterminer le mode d'exécution
+const isProduction = process.env.NODE_ENV === 'production';
 const port = Number(process.env.PORT || 2567);
 const app = express();
 
@@ -41,7 +43,8 @@ gameServer.define("game_room", GameRoom, { worldData })
 
 // Start server
 gameServer.listen(port, "0.0.0.0").then(() => {
-  console.log(`🚀 Server started and listening on all interfaces (0.0.0.0:${port})`);
+  console.log(`🚀 Server started in ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'} mode`);
+  console.log(`🚀 Listening on all interfaces (0.0.0.0:${port})`);
   console.log(`🎮 Colyseus monitor available at http://0.0.0.0:${port}/colyseus`);
   console.log(`📝 CORS enabled for all origins`);
 }).catch(err => {

@@ -82,3 +82,65 @@ Learn more about the power of Turborepo:
 - [Filtering](https://turbo.build/repo/docs/core-concepts/monorepos/filtering)
 - [Configuration Options](https://turbo.build/repo/docs/reference/configuration)
 - [CLI Usage](https://turbo.build/repo/docs/reference/command-line-reference)
+
+## Configuration du Serveur
+
+### Mode de Développement Local (par défaut)
+
+Par défaut, le client se connecte au serveur en local à l'adresse `http://localhost:2567`. Cette configuration est définie dans le fichier `apps/client/.env`.
+
+### Mode VPS avec IP Externe
+
+Pour connecter le client à un serveur distant :
+
+1. Modifiez le fichier `apps/client/.env` en commentant les lignes de serveur local et en décommentant les lignes avec l'adresse IP du VPS :
+   ```
+   # Configuration du serveur local (par défaut)
+   # VITE_SERVER_URL=http://localhost:2567
+   # VITE_COLYSEUS_URL=ws://localhost:2567
+
+   # Pour utiliser le serveur distant, décommentez ces lignes
+   VITE_SERVER_URL=http://57.128.190.227:2567
+   VITE_COLYSEUS_URL=ws://57.128.190.227:2567
+   ```
+
+2. Si vous déployez pour la production, utilisez plutôt le fichier `apps/client/.env.production` qui est déjà configuré avec l'adresse IP du VPS.
+
+### Exécution avec Arguments de Ligne de Commande
+
+Vous pouvez maintenant exécuter le client et le serveur en mode production directement à l'aide d'arguments de ligne de commande, sans avoir à modifier manuellement les fichiers `.env` :
+
+#### Client en mode développement (localhost)
+```
+pnpm run client
+```
+
+#### Client en mode production (utilise l'IP externe)
+```
+pnpm run client:prod
+```
+
+#### Serveur en mode développement
+```
+pnpm run server
+```
+
+#### Serveur en mode production
+```
+pnpm run server:prod
+```
+
+#### Exécuter client et serveur en mode production simultanément
+```
+pnpm run prod
+```
+
+### Déploiement en Production
+
+Lorsque vous construisez pour la production avec `npm run build`, Vite utilisera automatiquement les variables d'environnement définies dans `.env.production`.
+
+Commande pour construire le client en mode production :
+```
+cd pvpstrat-io/apps/client
+npm run build
+```

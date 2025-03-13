@@ -122,4 +122,24 @@ export class GameState extends Schema {
   @type({ map: UnitSchema }) units = new MapSchema<UnitSchema>();
   @type({ map: BuildingSchema }) buildings = new MapSchema<BuildingSchema>();
   @type({ map: ResourceSchema }) resources = new MapSchema<ResourceSchema>();
-} 
+}
+
+// Exporter toutes les constantes de balance
+export {
+  PLAYER_HEALTH,
+  UNIT_HEALTH,
+  BUILDING_HEALTH,
+  COMBAT,
+  PRODUCTION_RATES,
+  PRODUCTION_RECIPES,
+  MINING_CONFIG,
+  RESOURCE_AMOUNTS,
+  RESOURCE_RESPAWN_TIMES,
+  UNIT_COSTS,
+  UNIT_SPEED,
+  DEATH_SYSTEM,
+  POPULATION,
+  PERFORMANCE,
+  PLAYER_STARTING_RESOURCES,
+  HARVEST_AMOUNT
+} from './balance'; 

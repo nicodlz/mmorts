@@ -5,12 +5,18 @@
     "build": "turbo run build",
     "dev": "turbo run dev",
     "client": "turbo run dev --filter=client",
+    "client:prod": "cd apps/client && pnpm run dev:prod",
     "server": "turbo run dev --filter=server",
+    "server:prod": "cd apps/server && pnpm run dev:prod",
+    "server:prod:windows": "cd apps/server && pnpm run dev:prod:windows",
+    "prod": "concurrently \"pnpm run client:prod\" \"pnpm run server:prod\"",
+    "prod:windows": "concurrently \"pnpm run client:prod\" \"pnpm run server:prod:windows\"",
     "lint": "turbo run lint",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "check-types": "turbo run check-types"
   },
   "devDependencies": {
+    "concurrently": "^8.2.2",
     "prettier": "^3.5.3",
     "turbo": "^2.4.4",
     "typescript": "5.8.2"

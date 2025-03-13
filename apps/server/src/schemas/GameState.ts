@@ -1,4 +1,5 @@
 import { Schema, type, MapSchema } from "@colyseus/schema";
+import { PLAYER_HEALTH, UNIT_HEALTH, BUILDING_HEALTH } from "shared";
 
 // Types de ressources
 export enum ResourceType {
@@ -10,18 +11,34 @@ export enum ResourceType {
   STEEL = "steel"
 }
 
-// Constantes
-export const TILE_SIZE = 32;
-export const CHUNK_SIZE = 16;
+// Types de bâtiments
+export enum BuildingType {
+  FORGE = "forge",
+  HOUSE = "house",
+  FURNACE = "furnace",
+  FACTORY = "factory",
+  TOWER = "tower",
+  BARRACKS = "barracks",
+  TOWN_CENTER = "town_center",
+  YARD = "yard",
+  CABIN = "hut",
+  PLAYER_WALL = "player_wall"
+}
+
+// Types d'unités
+export enum UnitType {
+  WARRIOR = "warrior",
+  VILLAGER = "villager"
+}
 
 // Schéma pour un joueur
 export class PlayerSchema extends Schema {
-  @type("string") id: string;
+  @type("string") id: string = "";
   @type("string") name: string = "Player";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
-  @type("number") health: number = 600;
-  @type("number") maxHealth: number = 600;
+  @type("number") health: number = PLAYER_HEALTH.MAX_HEALTH;
+  @type("number") maxHealth: number = PLAYER_HEALTH.MAX_HEALTH;
   @type("number") hue: number = 0;
   @type("number") population: number = 0;
   @type("number") maxPopulation: number = 10;
@@ -46,13 +63,13 @@ export class PlayerSchema extends Schema {
 
 // Schéma pour une unité
 export class UnitSchema extends Schema {
-  @type("string") id: string;
-  @type("string") owner: string;
-  @type("string") type: string;
+  @type("string") id: string = "";
+  @type("string") owner: string = "";
+  @type("string") type: string = UnitType.WARRIOR;
   @type("number") x: number = 0;
   @type("number") y: number = 0;
-  @type("number") health: number = 100;
-  @type("number") maxHealth: number = 100;
+  @type("number") health: number = UNIT_HEALTH.WARRIOR.MAX_HEALTH;
+  @type("number") maxHealth: number = UNIT_HEALTH.WARRIOR.MAX_HEALTH;
   @type("number") rotation: number = 0;
   @type("boolean") isClickTargeting: boolean = false; // Indique si l'unité se déplace vers un point cliqué
   
@@ -64,23 +81,22 @@ export class UnitSchema extends Schema {
 
 // Schéma pour un bâtiment
 export class BuildingSchema extends Schema {
-  @type("string") id: string;
-  @type("string") owner: string;
-  @type("string") type: string;
+  @type("string") id: string = "";
+  @type("string") type: string = "";
+  @type("string") owner: string = "";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
-  @type("number") health: number = 100;
-  @type("number") maxHealth: number = 100;
-  @type("number") productionProgress: number = 0;
-  @type("boolean") productionActive: boolean = true;
-  @type("number") progress: number = 0; // Pour les bâtiments en construction
+  @type("number") health: number = BUILDING_HEALTH.DEFAULT;
+  @type("number") maxHealth: number = BUILDING_HEALTH.DEFAULT;
+  @type("number") productionProgress: number = 0; // Progression de la production (0-100)
+  @type("boolean") productionActive: boolean = true; // Production active ou non
   @type("boolean") fullTileCollision: boolean = false; // Pour les bâtiments qui occupent toute la case
 }
 
 // Schéma pour une ressource
 export class ResourceSchema extends Schema {
-  @type("string") id: string;
-  @type("string") type: string;
+  @type("string") id: string = "";
+  @type("string") type: string = "";
   @type("number") x: number = 0;
   @type("number") y: number = 0;
   @type("number") amount: number = 100;
@@ -90,10 +106,21 @@ export class ResourceSchema extends Schema {
   @type("boolean") isRespawning: boolean = false;
 }
 
+// Constantes globales
+export const TILE_SIZE = 32; // Taille d'une tuile en pixels
+export const CHUNK_SIZE = 16; // Taille d'un chunk en tuiles
+
 // Schéma principal du jeu
 export class GameState extends Schema {
-  @type({ map: PlayerSchema }) players = new MapSchema<PlayerSchema>();
-  @type({ map: UnitSchema }) units = new MapSchema<UnitSchema>();
-  @type({ map: BuildingSchema }) buildings = new MapSchema<BuildingSchema>();
-  @type({ map: ResourceSchema }) resources = new MapSchema<ResourceSchema>();
+  @type({ map: PlayerSchema })
+  players = new MapSchema<PlayerSchema>();
+
+  @type({ map: UnitSchema })
+  units = new MapSchema<UnitSchema>();
+
+  @type({ map: BuildingSchema })
+  buildings = new MapSchema<BuildingSchema>();
+
+  @type({ map: ResourceSchema })
+  resources = new MapSchema<ResourceSchema>();
 } 

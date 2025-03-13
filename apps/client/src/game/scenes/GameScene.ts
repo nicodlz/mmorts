@@ -169,7 +169,7 @@ export class GameScene extends Phaser.Scene {
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
-    const serverUrl = import.meta.env?.VITE_COLYSEUS_URL || "ws://57.128.190.227:2567";
+    const serverUrl = import.meta.env?.VITE_COLYSEUS_URL || "ws://localhost:2567";
     console.log("Tentative de connexion au serveur:", serverUrl);
     this.client = new Client(serverUrl);
   }
@@ -750,9 +750,6 @@ export class GameScene extends Phaser.Scene {
     this.room.onMessage("unitDamaged", (data: any) => {
       console.log("Unité endommagée:", data);
       
-      // Ne plus mettre à jour la barre de vie
-      // this.updateUnitHealthBar(data.unitId, data.health, data.maxHealth);
-      
       // Montrer l'effet de dégâts
       const unitData = this.unitSprites.get(data.unitId);
       if (unitData) {
@@ -760,6 +757,9 @@ export class GameScene extends Phaser.Scene {
         
         // Effet de recul léger (secousse)
         this.addContainerShakeEffect(unitData.sprite, 0.5);
+        
+        // Ajouter l'effet de clignotement
+        this.addDamageFlashEffect(unitData.sprite);
       }
     });
     
@@ -839,6 +839,8 @@ export class GameScene extends Phaser.Scene {
       
       // S'assurer que la teinte rouge est réinitialisée
       if (this.damageTint) {
+        // Arrêter toutes les animations en cours sur la teinte
+        this.tweens.killTweensOf(this.damageTint);
         this.damageTint.setAlpha(0);
         console.log("Teinte rouge réinitialisée lors du respawn");
       }
@@ -868,6 +870,9 @@ export class GameScene extends Phaser.Scene {
         
         this.player.setPosition(message.x, message.y);
         this.cameras.main.centerOn(message.x, message.y);
+        
+        // Rétablir l'opacité normale du joueur au cas où
+        this.player.setAlpha(1);
       }
       
       // Mettre à jour la barre de vie si l'information est disponible
@@ -2788,6 +2793,19 @@ export class GameScene extends Phaser.Scene {
     const amount = resourceSprite.getData('amount');
     if (amount <= 0) return;
     
+    // Récupérer la quantité qui sera récoltée pour ce type de ressource
+    // Ces valeurs devraient correspondre à celles définies dans HARVEST_AMOUNT
+    const harvestAmounts = {
+      gold: 3,
+      wood: 3,
+      stone: 3,
+      iron: 0,
+      coal: 0,
+      steel: 0
+    };
+    
+    const harvestAmount = harvestAmounts[resource.type] || 1;
+    
     // Envoyer un message au serveur pour récolter
     if (this.room) {
       this.room.send("harvest", {
@@ -2798,8 +2816,8 @@ export class GameScene extends Phaser.Scene {
       // Ajouter l'effet de tremblement
       this.addShakeEffect(resourceSprite, 0.5);
       
-      // Afficher l'effet +1
-      this.showNumericEffect('+1', resourceSprite.x, resourceSprite.y, resource.type);
+      // Afficher l'effet avec la quantité correcte
+      this.showNumericEffect(`+${harvestAmount}`, resourceSprite.x, resourceSprite.y, resource.type);
     }
   }
   
@@ -3860,6 +3878,9 @@ export class GameScene extends Phaser.Scene {
       this.damageTint.setAlpha(0); // Invisible par défaut
     }
     
+    // Arrêter toute animation en cours sur la teinte
+    this.tweens.killTweensOf(this.damageTint);
+    
     // Animation de flash rouge
     this.tweens.add({
       targets: this.damageTint,
@@ -3896,6 +3917,11 @@ export class GameScene extends Phaser.Scene {
         damageText.destroy();
       }
     });
+    
+    // Appliquer l'effet de clignotement au sprite du joueur
+    if (this.player) {
+      this.addDamageFlashEffect(this.player);
+    }
   }
   
   // Alerte de santé critique
@@ -4051,6 +4077,8 @@ export class GameScene extends Phaser.Scene {
     
     // Réinitialiser la teinte rouge si elle existe
     if (this.damageTint) {
+      // Arrêter toutes les animations en cours
+      this.tweens.killTweensOf(this.damageTint);
       this.damageTint.setAlpha(0);
       console.log("Teinte rouge réinitialisée à alpha 0");
     }
@@ -4060,6 +4088,8 @@ export class GameScene extends Phaser.Scene {
   private showRespawnEffect() {
     // Réinitialiser la teinte rouge si elle existe pour s'assurer qu'elle disparaît
     if (this.damageTint) {
+      // Arrêter toutes les animations en cours
+      this.tweens.killTweensOf(this.damageTint);
       this.damageTint.setAlpha(0);
     }
     
@@ -4136,5 +4166,28 @@ export class GameScene extends Phaser.Scene {
     });
     // Vider la collection
     this.unitHealthBars.clear();
+  }
+
+  // Ajouter un effet de clignotement d'opacité pour les dégâts
+  private addDamageFlashEffect(target: Phaser.GameObjects.GameObject, flashes: number = 3, flashDuration: number = 100) {
+    // Arrêter toute animation d'opacité en cours
+    this.tweens.killTweensOf(target);
+    
+    // Sauvegarder l'opacité originale (avec cast pour éviter les erreurs de typage)
+    const originalAlpha = (target as any).alpha || 1;
+    
+    // Créer un tween pour le premier clignotement
+    this.tweens.add({
+      targets: target,
+      alpha: 0.5,
+      duration: flashDuration,
+      yoyo: true, // Retour à l'état original
+      repeat: flashes - 1, // Répéter pour le nombre de clignotements spécifiés
+      ease: 'Linear',
+      onComplete: () => {
+        // S'assurer que l'alpha est restauré à sa valeur d'origine
+        (target as any).alpha = originalAlpha;
+      }
+    });
   }
 } 

@@ -11,7 +11,20 @@ import {
   GameState as GameStateSchema
 } from "../schemas/GameState";
 
-import { BUILDING_COSTS, BuildingType } from "shared";
+import { 
+  BUILDING_COSTS, 
+  BuildingType, 
+  PRODUCTION_RATES, 
+  PRODUCTION_RECIPES, 
+  RESOURCE_AMOUNTS, 
+  RESOURCE_RESPAWN_TIMES,
+  PERFORMANCE,
+  UNIT_COSTS,
+  COMBAT,
+  DEATH_SYSTEM,
+  PLAYER_STARTING_RESOURCES,
+  HARVEST_AMOUNT
+} from "shared";
 
 // Schéma principal du jeu
 class GameState extends Schema {
@@ -29,7 +42,7 @@ class GameState extends Schema {
 }
 
 export class GameRoom extends Room<GameState> {
-  private readonly SIMULATION_INTERVAL = 1000 / 30; // 30 fois par seconde
+  private readonly SIMULATION_INTERVAL = PERFORMANCE.SIMULATION_INTERVAL;
   private intervalId: NodeJS.Timeout | null = null;
   private mapLines: string[] = [];
   private resourcesByChunk: Map<string, Set<string>> = new Map(); // Ressources par chunk
@@ -40,60 +53,13 @@ export class GameRoom extends Room<GameState> {
   // Map pour stocker les informations de micro-mouvement des unités
   private unitMicroMovements: Map<string, { x: number, y: number, phase: number }> = new Map();
   
-  // Système de production
-  private readonly PRODUCTION_RATES: { [key: string]: number } = {
-    [BuildingType.FURNACE]: 10000, // 10 secondes pour produire du charbon
-    [BuildingType.FORGE]: 8000,    // 8 secondes pour produire du fer
-    [BuildingType.FACTORY]: 30000  // 30 secondes pour produire de l'acier
-  };
-  
-  // Recettes pour les bâtiments de production
-  private readonly PRODUCTION_RECIPES: { 
-    [key: string]: { 
-      inputs: { [resource: string]: number },
-      outputs: { [resource: string]: number }
-    } 
-  } = {
-    [BuildingType.FURNACE]: {
-      inputs: { [ResourceType.WOOD]: 5 },
-      outputs: { [ResourceType.COAL]: 1 }
-    },
-    [BuildingType.FORGE]: {
-      inputs: { [ResourceType.STONE]: 3 },
-      outputs: { [ResourceType.IRON]: 2 }
-    },
-    [BuildingType.FACTORY]: {
-      inputs: { [ResourceType.COAL]: 3, [ResourceType.IRON]: 3 },
-      outputs: { [ResourceType.STEEL]: 1 }
-    }
-  };
-  
   // Ajouter des propriétés pour l'optimisation des broadcasts
   private playerUpdateRates: Map<string, { 
     lastFullUpdate: number,
     lastPositionUpdate: number
   }> = new Map();
-  private readonly NEARBY_UPDATE_RATE = 100; // 10 fois par seconde pour les objets proches
-  private readonly DISTANT_UPDATE_RATE = 500; // 2 fois par seconde pour les objets distants
-
-  // Constantes pour les quantités de ressources par type
-  private readonly RESOURCE_AMOUNTS: {[key: string]: number} = {
-    [ResourceType.GOLD]: 100,
-    [ResourceType.WOOD]: 20,
-    [ResourceType.STONE]: 75,
-    [ResourceType.IRON]: 60,
-    [ResourceType.COAL]: 40,
-    [ResourceType.STEEL]: 30
-  };
-
-  private readonly RESOURCE_RESPAWN_TIMES: {[key: string]: number} = {
-    [ResourceType.GOLD]: 999999999,   // Désactivé temporairement
-    [ResourceType.WOOD]: 999999999,   // Désactivé temporairement
-    [ResourceType.STONE]: 999999999,  // Désactivé temporairement
-    [ResourceType.IRON]: 999999999,   // Désactivé temporairement
-    [ResourceType.COAL]: 999999999,   // Désactivé temporairement
-    [ResourceType.STEEL]: 999999999   // Désactivé temporairement
-  };
+  private readonly NEARBY_UPDATE_RATE = PERFORMANCE.NEARBY_UPDATE_RATE;
+  private readonly DISTANT_UPDATE_RATE = PERFORMANCE.DISTANT_UPDATE_RATE;
 
   onCreate(options: { worldData: { mapLines: string[], resources: Map<string, ResourceSchema>, resourcesByChunk: Map<string, Set<string>> } }) {
     // Initialiser l'état du jeu
@@ -174,9 +140,9 @@ export class GameRoom extends Room<GameState> {
       const player = this.state.players.get(client.sessionId);
       if (!player) return;
       
-      // Vérifier que le joueur a assez de ressources (2 or, 2 fer)
-      const goldCost = 2;
-      const ironCost = 2;
+      // Vérifier que le joueur a assez de ressources
+      const goldCost = UNIT_COSTS.WARRIOR[ResourceType.GOLD];
+      const ironCost = UNIT_COSTS.WARRIOR[ResourceType.IRON];
       
       if ((player.resources.get(ResourceType.GOLD) || 0) < goldCost || 
           (player.resources.get(ResourceType.IRON) || 0) < ironCost) {
@@ -344,12 +310,11 @@ export class GameRoom extends Room<GameState> {
 
     // Initialiser les ressources du joueur
     player.resources = new MapSchema<number>();
-    player.resources.set(ResourceType.WOOD, 10000);
-    player.resources.set(ResourceType.STONE, 10000);
-    player.resources.set(ResourceType.GOLD, 10000);
-    player.resources.set(ResourceType.IRON, 10000);
-    player.resources.set(ResourceType.COAL, 10000);
-    player.resources.set(ResourceType.STEEL, 10000);
+    
+    // Utiliser les ressources de départ définies dans balance.ts
+    Object.entries(PLAYER_STARTING_RESOURCES).forEach(([resource, amount]) => {
+      player.resources.set(resource, amount);
+    });
     
     // Définir la population initiale à 1 au lieu de 0
     player.population = 1;
@@ -435,12 +400,12 @@ export class GameRoom extends Room<GameState> {
     // Parcourir tous les bâtiments
     for (const [buildingId, building] of this.state.buildings.entries()) {
       // Vérifier si c'est un bâtiment de production
-      if (this.PRODUCTION_RATES[building.type] && building.productionActive) {
+      if (PRODUCTION_RATES[building.type] && building.productionActive) {
         const player = this.state.players.get(building.owner);
         if (!player) continue;
         
         // Incrémenter la progression de la production, mais limiter les mises à jour
-        const increment = (this.SIMULATION_INTERVAL / this.PRODUCTION_RATES[building.type]) * 100;
+        const increment = (this.SIMULATION_INTERVAL / PRODUCTION_RATES[building.type]) * 100;
         const newProgress = building.productionProgress + increment;
         
         // Ne mettre à jour que si le changement est significatif (au moins 1%)
@@ -464,7 +429,7 @@ export class GameRoom extends Room<GameState> {
           if (building["_productionProgress"]) building["_productionProgress"] = 0;
           
           // Obtenir la recette pour ce type de bâtiment
-          const recipe = this.PRODUCTION_RECIPES[building.type];
+          const recipe = PRODUCTION_RECIPES[building.type];
           if (!recipe) continue;
           
           // Vérifier si le joueur a les ressources nécessaires
@@ -682,7 +647,7 @@ export class GameRoom extends Room<GameState> {
           resource.type = resourceType;
           resource.x = x * TILE_SIZE + TILE_SIZE/2;
           resource.y = y * TILE_SIZE + TILE_SIZE/2;
-          resource.amount = this.RESOURCE_AMOUNTS[resourceType];
+          resource.amount = RESOURCE_AMOUNTS[resourceType];
           
           // Stocker la ressource dans notre map locale au lieu de l'état global
           this.resources.set(resource.id, resource);
@@ -772,8 +737,10 @@ export class GameRoom extends Room<GameState> {
     // Mettre à jour le temps de dernière récolte
     resource.lastHarvestTime = now;
     
-    // Réduire la quantité de ressource disponible (3 au lieu de 1)
-    const harvestAmount = 3;
+    // Récupérer la quantité à récolter depuis balance.ts
+    const harvestAmount = HARVEST_AMOUNT[resource.type as ResourceType] || 0;
+    
+    // Réduire la quantité de ressource disponible
     resource.amount = Math.max(0, resource.amount - harvestAmount);
     
     // Ajouter la ressource à l'inventaire du joueur
@@ -782,7 +749,7 @@ export class GameRoom extends Room<GameState> {
       player.resources = new MapSchema<number>();
     }
     
-    // Ajouter la ressource au joueur (3 au lieu de 1)
+    // Ajouter la ressource au joueur
     const currentAmount = player.resources.get(resource.type) || 0;
     player.resources.set(resource.type, currentAmount + harvestAmount);
     
@@ -805,10 +772,10 @@ export class GameRoom extends Room<GameState> {
       resource.isRespawning = true;
       
       // Planifier la réapparition
-      const respawnTime = this.RESOURCE_RESPAWN_TIMES[resource.type] || 60000;
+      const respawnTime = RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000;
       setTimeout(() => {
         if (this.resources.has(resourceId)) {
-          resource.amount = this.RESOURCE_AMOUNTS[resource.type] || resource.maxAmount;
+          resource.amount = RESOURCE_AMOUNTS[resource.type as ResourceType] || resource.maxAmount;
           resource.isRespawning = false;
           
           // Broadcast la réapparition
@@ -891,7 +858,7 @@ export class GameRoom extends Room<GameState> {
     building.y = y;
     
     // Initialiser les propriétés de production pour les bâtiments de production
-    if (this.PRODUCTION_RATES[type]) {
+    if (PRODUCTION_RATES[type]) {
       building.productionProgress = 0;
       building.productionActive = true;
       console.log(`Bâtiment de production ${type} créé avec production active`);
@@ -1439,7 +1406,7 @@ export class GameRoom extends Room<GameState> {
     const nearbyResources = this.getResourcesInRange(x, y, 1); // Augmenté de 0.5 à 1 chunk
     for (const resourceId of nearbyResources) {
       const resource = this.resources.get(resourceId);
-      if (resource) {
+      if (resource && resource.amount > 0) {  // Ignorer les ressources avec une quantité de 0
         // Déterminer un rayon de collision basé sur le type de ressource
         let collisionRadius = TILE_SIZE * 0.8; // Rayon de base augmenté
         
@@ -1572,8 +1539,8 @@ export class GameRoom extends Room<GameState> {
         // Ignorer les unités qui ne sont pas des guerriers
         if (attacker.type !== "warrior") continue;
         
-        // Vérifier le cooldown d'attaque (2 fois par seconde)
-        if (now - attacker.lastAttackTime < 500) continue;
+        // Vérifier le cooldown d'attaque
+        if (now - attacker.lastAttackTime < COMBAT.ATTACK_COOLDOWN) continue;
         
         // Vérifier si l'unité peut attaquer d'autres unités dans la même cellule
         for (const target of unitsInCell) {
@@ -1586,8 +1553,8 @@ export class GameRoom extends Room<GameState> {
             Math.pow(attacker.y - target.y, 2)
           );
           
-          // Vérifier si la cible est à portée d'attaque (20 pixels)
-          if (distance <= 20) {
+          // Vérifier si la cible est à portée d'attaque
+          if (distance <= COMBAT.ATTACK_RANGE) {
             // L'unité attaque cette cible
             this.performAttack(attacker, target, now);
             // Une seule attaque par tick
@@ -1610,8 +1577,8 @@ export class GameRoom extends Room<GameState> {
             Math.pow(attacker.y - player.y, 2)
           );
           
-          // Vérifier si le joueur est à portée d'attaque (20 pixels)
-          if (distance <= 20) {
+          // Vérifier si le joueur est à portée d'attaque
+          if (distance <= COMBAT.ATTACK_RANGE) {
             // L'unité attaque le joueur
             this.performPlayerAttack(attacker, player, playerId, now);
             hasAttackedPlayer = true; // Marquer qu'une attaque a été effectuée
@@ -1627,8 +1594,8 @@ export class GameRoom extends Room<GameState> {
     attacker.lastAttackTime = now;
     attacker.attackTarget = target.id;
     
-    // Calculer les dégâts de base avec une légère variation aléatoire (±10%)
-    const baseDamage = attacker.damage * (0.9 + Math.random() * 0.2);
+    // Calculer les dégâts de base avec une légère variation aléatoire
+    const baseDamage = attacker.damage * (1 - COMBAT.DAMAGE_RANDOM_VARIATION + Math.random() * COMBAT.DAMAGE_RANDOM_VARIATION * 2);
     
     // Vérifier si la cible est en position défensive
     const targetOwner = this.state.players.get(target.owner);
@@ -1636,7 +1603,7 @@ export class GameRoom extends Room<GameState> {
     
     // Appliquer le bonus défensif si conditions remplies
     if (targetOwner && targetOwner.isTargetMode && !targetOwner.isMovingUnits) {
-      finalDamage *= 0.7; // Réduction de 30%
+      finalDamage *= (1 - COMBAT.DEFENSIVE_MODE_REDUCTION);
     }
     
     // Arrondir les dégâts
@@ -1698,12 +1665,12 @@ export class GameRoom extends Room<GameState> {
     attacker.lastAttackTime = now;
     
     // Les dégâts contre le joueur sont légèrement réduits
-    const baseDamage = attacker.damage * 0.8 * (0.9 + Math.random() * 0.2);
+    const baseDamage = attacker.damage * (1 - COMBAT.PLAYER_DAMAGE_REDUCTION) * (1 - COMBAT.DAMAGE_RANDOM_VARIATION + Math.random() * COMBAT.DAMAGE_RANDOM_VARIATION * 2);
     
     // Appliquer le bonus défensif si conditions remplies
     let finalDamage = baseDamage;
     if (player.isTargetMode && !player.isMovingUnits) {
-      finalDamage *= 0.7; // Réduction de 30%
+      finalDamage *= (1 - COMBAT.DEFENSIVE_MODE_REDUCTION);
     }
     
     // Arrondir les dégâts
@@ -1738,13 +1705,13 @@ export class GameRoom extends Room<GameState> {
       player.isDead = true;
       player.deathTime = now;
       
-      const respawnDelayMs = 5000; // 5 secondes
-      player.respawnTime = now + respawnDelayMs; // Respawn dans 5 secondes
+      const respawnDelayMs = DEATH_SYSTEM.PLAYER_RESPAWN_TIME;
+      player.respawnTime = now + respawnDelayMs;
       
-      // Faire tomber une partie des ressources (30%)
+      // Faire tomber une partie des ressources
       const droppedResources = {};
       for (const [resourceType, amount] of Object.entries(player.resources)) {
-        const amountToDrop = Math.floor(Number(amount) * 0.3); // 30% des ressources
+        const amountToDrop = Math.floor(Number(amount) * DEATH_SYSTEM.RESOURCE_LOSS_PERCENT);
         if (amountToDrop > 0) {
           droppedResources[resourceType] = amountToDrop;
           player.resources[resourceType] -= amountToDrop;
