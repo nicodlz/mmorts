@@ -11,8 +11,10 @@ import {
   BUILDING_COSTS,
   BuildingType,
   HARVEST_AMOUNT,
-  RESOURCE_AMOUNTS  // Ajouter l'importation ici
+  RESOURCE_AMOUNTS
 } from 'shared';
+import { PerformanceManager, QualityLevel } from '../utils/PerformanceManager';
+import { ObjectPool } from '../utils/ObjectPool';
 
 export class GameScene extends Phaser.Scene {
   // Client Colyseus
@@ -57,7 +59,7 @@ export class GameScene extends Phaser.Scene {
   // Mode de jeu
   private isToolMode: boolean = true;
   
-  // Paramètres d'interpolation
+  // Paramètres d'interpolation - à remplacer par des valeurs dynamiques
   private readonly LERP_FACTOR: number = 0.08;
   private readonly NETWORK_UPDATE_RATE: number = 100;
   private lastNetworkUpdate: number = 0;
@@ -78,6 +80,13 @@ export class GameScene extends Phaser.Scene {
   private lastPlayerX: number = 0;
   private lastPlayerY: number = 0;
   private positionThreshold: number = 0.5; // Seuil pour détecter un changement significatif de position
+
+  // Performance monitoring
+  private fpsText?: Phaser.GameObjects.Text;
+  private pingText?: Phaser.GameObjects.Text;
+  private lastPingTime: number = 0;
+  private currentPing: number = 0;
+  private lastFpsUpdate: number = 0;
   
   // Ajout de propriétés pour la gestion de subpixels
   private subPixelFactor: number = 4; // Facteur de subdivision des pixels
@@ -162,6 +171,12 @@ export class GameScene extends Phaser.Scene {
   
   // Ajouter cette propriété à la classe
   private respawnIntervalId?: number;
+  
+  // Pools d'objets pour les effets visuels
+  private textEffectPool?: ObjectPool<Phaser.GameObjects.Text>;
+  private damageEffectPool?: ObjectPool<Phaser.GameObjects.Text>;
+  private activeTextEffects: Set<Phaser.GameObjects.Text> = new Set();
+  private activeDamageEffects: Set<Phaser.GameObjects.Text> = new Set();
   
   constructor() {
     super({ key: 'GameScene' });
@@ -295,6 +310,9 @@ export class GameScene extends Phaser.Scene {
     }, this);
     
     this.input.on('pointerup', this.handlePointerUp, this);
+    
+    // Initialiser le gestionnaire de performances
+    PerformanceManager.initialize();
   }
   
   async create() {
@@ -507,10 +525,40 @@ export class GameScene extends Phaser.Scene {
     
     // Supprimer toutes les barres de vie des unités
     this.clearAllUnitHealthBars();
+    
+    // Initialiser les pools d'objets
+    this.initObjectPools();
+    
+    // Ajouter des indicateurs de performance
+    this.createPerformanceIndicators();
   }
   
   update(time: number, delta: number) {
     if (!this.room || !this.player) return;
+    
+    // Mettre à jour les métriques de performance tous les 500ms
+    if (time - this.lastFpsUpdate > 500) {
+      // Calculer FPS
+      const fps = Math.round(1000 / delta);
+      
+      // Mettre à jour les indicateurs
+      if (this.fpsText) {
+        this.fpsText.setText(`FPS: ${fps}`);
+        this.fpsText.setColor(fps < 20 ? '#ff0000' : (fps < 45 ? '#ffff00' : '#00ff00'));
+      }
+      
+      if (this.pingText) {
+        this.pingText.setText(`Ping: ${this.currentPing}ms`);
+        this.pingText.setColor(this.currentPing > 300 ? '#ff0000' : (this.currentPing > 150 ? '#ffff00' : '#00ff00'));
+      }
+      
+      // Mettre à jour les statistiques de performance
+      PerformanceManager.updateStats(fps, this.currentPing);
+      this.lastFpsUpdate = time;
+      
+      // Mettre à jour les paramètres adaptés aux performances
+      this.updateDynamicParameters();
+    }
     
     // Déterminer le chunk actuel du joueur
     const playerChunkX = Math.floor(this.actualX / (this.tileSize * this.CHUNK_SIZE));
@@ -525,7 +573,7 @@ export class GameScene extends Phaser.Scene {
     }
     
     // Optimiser le rendu en désactivant les objets hors écran
-    if (time - this.lastRenderOptimization > this.RENDER_OPTIMIZATION_INTERVAL) {
+    if (time - this.lastRenderOptimization > PerformanceManager.renderOptimizationInterval) {
       this.optimizeRendering();
       this.lastRenderOptimization = time;
     }
@@ -581,10 +629,14 @@ export class GameScene extends Phaser.Scene {
     
     // Synchroniser la position avec le serveur (limité par la fréquence et seulement si on a bougé)
     const now = time;
-    if (Math.abs(this.actualX - this.lastPlayerX) > this.positionThreshold || 
-                    Math.abs(this.actualY - this.lastPlayerY) > this.positionThreshold) {
+    if ((Math.abs(this.actualX - this.lastPlayerX) > PerformanceManager.positionThreshold || 
+         Math.abs(this.actualY - this.lastPlayerY) > PerformanceManager.positionThreshold) &&
+        (now - this.lastNetworkUpdate > PerformanceManager.networkUpdateRate)) {
       this.synchronizePlayerPosition();
       this.lastNetworkUpdate = now;
+      
+      // Calculer le ping (temps entre l'envoi et la réception d'une mise à jour)
+      this.lastPingTime = now;
       
       // Mémoriser la dernière position
       this.lastPlayerX = this.actualX;
@@ -651,6 +703,13 @@ export class GameScene extends Phaser.Scene {
     if (!this.isPlayerDead && this.deathScreen) {
       console.log("Anomalie détectée: écran de mort présent alors que le joueur n'est pas mort. Nettoyage forcé.");
       this.hideDeathScreen();
+    }
+    
+    // Adapter la taille des pools en fonction de la qualité
+    if (this.textEffectPool && this.damageEffectPool) {
+      const maxPoolSize = Math.floor(PerformanceManager.maxTilePoolSize / 10);
+      this.textEffectPool.maxPoolSize = maxPoolSize;
+      this.damageEffectPool.maxPoolSize = Math.floor(maxPoolSize / 2);
     }
   }
   
@@ -2035,8 +2094,8 @@ export class GameScene extends Phaser.Scene {
         return;
       }
       
-      // Calculer le facteur d'interpolation basé sur delta pour des mouvements constants
-      const lerpFactor = Math.min(this.LERP_FACTOR * delta / 16, 1);
+      // Calculer le facteur d'interpolation basé sur delta et le facteur de performance
+      const lerpFactor = Math.min(PerformanceManager.lerpFactor * delta / 16, 1);
       
       // Appliquer l'interpolation pour un mouvement fluide en subpixels
       sprite.x = Phaser.Math.Linear(sprite.x, targetX, lerpFactor);
@@ -2213,7 +2272,7 @@ export class GameScene extends Phaser.Scene {
   // Méthode pour nettoyer les tuiles qui ne sont plus visibles
   private cleanupDistantTiles(currentTime: number) {
     // Ne pas nettoyer trop fréquemment
-    if (currentTime - this.lastCleanupTime < this.cleanupInterval) return;
+    if (currentTime - this.lastCleanupTime < PerformanceManager.cleanupInterval) return;
     this.lastCleanupTime = currentTime;
     
     if (!this.player) return;
@@ -2938,6 +2997,14 @@ export class GameScene extends Phaser.Scene {
     // Ne plus dépendre du groupe numericEffects
     console.log(`Création d'un effet numérique: ${text} à (${x}, ${y}) de type ${type}`);
     
+    // Si la qualité est très basse, réduire ou désactiver les effets
+    if (PerformanceManager.effectsQuality < 0.3 && Math.random() > PerformanceManager.effectsQuality) {
+      return; // Ignorer certains effets aléatoirement en basse qualité
+    }
+    
+    // S'assurer que le pool est initialisé
+    if (!this.textEffectPool) return;
+    
     const color = type === 'gold' ? '#FFD700' : 
                   type === 'wood' ? '#8B4513' : 
                   type === 'stone' ? '#808080' : 
@@ -2945,27 +3012,34 @@ export class GameScene extends Phaser.Scene {
                   type === 'coal' ? '#333333' :
                   type === 'steel' ? '#71797E' :
                   '#FFFFFF';
-
-    const effect = this.add.text(x, y - 20, text, {
-      fontSize: '16px',
+                  
+    // Obtenir un effet du pool
+    const effect = this.textEffectPool.get();
+    this.activeTextEffects.add(effect);
+    
+    // Configurer l'effet
+    effect.setText(text);
+    effect.setPosition(x, y - 20);
+    effect.setStyle({ 
       color: color,
-      stroke: '#000000',
-      strokeThickness: 2,
-      fontStyle: 'bold'
+      strokeThickness: PerformanceManager.effectsQuality > 0.5 ? 2 : 1 
     });
-    effect.setOrigin(0.5);
-    effect.setDepth(100);
+    effect.setVisible(true);
+    effect.setAlpha(1);
+    effect.setScale(1);
 
-    // Ajouter une animation plus visible
+    // Adapter l'animation à la qualité
+    const duration = 1500 * PerformanceManager.effectsQuality; // Réduire la durée en basse qualité
     this.tweens.add({
       targets: effect,
-      y: y - 50, // Monter plus haut
+      y: y - (30 + 20 * PerformanceManager.effectsQuality), // Monter moins haut en basse qualité
       alpha: { from: 1, to: 0 },
-      scale: { from: 1, to: 1.5 }, // Grossir légèrement
-      duration: 1500, // Plus lente pour être plus visible
+      scale: { from: 1, to: 1 + 0.5 * PerformanceManager.effectsQuality }, // Moins grossir en basse qualité
+      duration: duration,
       ease: 'Power2',
       onComplete: () => {
-        effect.destroy();
+        this.activeTextEffects.delete(effect);
+        this.textEffectPool?.release(effect);
       }
     });
     
@@ -3589,9 +3663,9 @@ export class GameScene extends Phaser.Scene {
         // Vérifier si c'est un joueur ou une unité
         const isPlayer = this.room && this.room.state && this.room.state.players.has(unitId);
         
-        // Calculer le facteur d'interpolation basé sur delta pour des mouvements constants
+        // Calculer le facteur d'interpolation basé sur delta et le facteur de performance
         // Pour les unités: utiliser un facteur plus doux (0.8 au lieu de 1.5)
-        const lerpFactor = Math.min(this.LERP_FACTOR * delta / 16 * (isPlayer ? 1 : 0.8), 1);
+        const lerpFactor = Math.min(PerformanceManager.lerpFactor * delta / 16 * (isPlayer ? 1 : 0.8), 1);
         
         // Position actuelle
         const currentX = unitData.sprite.x;
@@ -3826,25 +3900,39 @@ export class GameScene extends Phaser.Scene {
   
   // Afficher un effet de dégâts à une position donnée
   private showDamageEffect(x: number, y: number, damage: number) {
-    // Créer un texte affichant les dégâts
-    const damageText = this.add.text(x, y - 20, `-${damage}`, {
-      fontSize: '14px',
-      color: '#ff0000',
-      stroke: '#000000',
-      strokeThickness: 2
-    });
-    damageText.setOrigin(0.5);
+    // Si la qualité est très basse, réduire ou désactiver les effets
+    if (PerformanceManager.effectsQuality < 0.3 && Math.random() > PerformanceManager.effectsQuality) {
+      return; // Ignorer certains effets aléatoirement en basse qualité
+    }
     
-    // Animation de "pop-up" et disparition
+    // S'assurer que le pool est initialisé
+    if (!this.damageEffectPool) return;
+    
+    // Obtenir un effet du pool
+    const damageText = this.damageEffectPool.get();
+    this.activeDamageEffects.add(damageText);
+    
+    // Configurer l'effet
+    damageText.setText(`-${damage}`);
+    damageText.setPosition(x, y - 20);
+    damageText.setVisible(true);
+    damageText.setAlpha(1);
+    damageText.setScale(1);
+    
+    // Durée adaptée à la qualité
+    const duration = 1000 * PerformanceManager.effectsQuality;
+    
+    // Animation simplifiée en basse qualité
     this.tweens.add({
       targets: damageText,
-      y: y - 40, // Monter
-      alpha: 0,  // Disparaître
-      scale: 1.5, // Grossir légèrement
-      duration: 1000,
+      y: y - (30 + 10 * PerformanceManager.effectsQuality), // Monter
+      alpha: 0, // Disparaître
+      scale: 1 + 0.5 * PerformanceManager.effectsQuality, // Grossir
+      duration: duration,
       ease: 'Power2',
       onComplete: () => {
-        damageText.destroy();
+        this.activeDamageEffects.delete(damageText);
+        this.damageEffectPool?.release(damageText);
       }
     });
   }
@@ -4176,5 +4264,106 @@ export class GameScene extends Phaser.Scene {
         (target as any).alpha = originalAlpha;
       }
     });
+  }
+
+  // Méthode pour créer les indicateurs de performance
+  private createPerformanceIndicators() {
+    // Créer le texte FPS
+    this.fpsText = this.add.text(10, 10, 'FPS: 0', {
+      fontSize: '14px',
+      color: '#ffffff',
+      strokeThickness: 1,
+      stroke: '#000000'
+    });
+    this.fpsText.setScrollFactor(0);
+    this.fpsText.setDepth(100);
+    
+    // Créer le texte Ping
+    this.pingText = this.add.text(10, 30, 'Ping: 0ms', {
+      fontSize: '14px',
+      color: '#ffffff',
+      strokeThickness: 1,
+      stroke: '#000000'
+    });
+    this.pingText.setScrollFactor(0);
+    this.pingText.setDepth(100);
+    
+    // Créer un indicateur de qualité
+    const qualityText = this.add.text(10, 50, 'Qualité: Auto (F8)', {
+      fontSize: '14px',
+      color: '#ffffff',
+      strokeThickness: 1,
+      stroke: '#000000'
+    });
+    qualityText.setScrollFactor(0);
+    qualityText.setDepth(100);
+  }
+
+  // Mettre à jour les paramètres en fonction des performances
+  private updateDynamicParameters() {
+    // Mettre à jour les paramètres pour qu'ils correspondent aux valeurs du gestionnaire
+    this.renderDistance = PerformanceManager.renderDistance;
+    this.maxTilePoolSize = PerformanceManager.maxTilePoolSize;
+    this.cleanupInterval = PerformanceManager.cleanupInterval;
+  }
+
+  // Initialiser les pools d'objets pour les effets visuels
+  private initObjectPools() {
+    // Pool pour les effets de texte numériques
+    this.textEffectPool = new ObjectPool<Phaser.GameObjects.Text>(
+      // Factory pour créer un nouvel effet
+      () => {
+        const text = this.add.text(0, 0, '', {
+          fontSize: '16px',
+          color: '#ffffff',
+          stroke: '#000000',
+          strokeThickness: 2,
+          fontStyle: 'bold'
+        });
+        text.setOrigin(0.5);
+        text.setDepth(100);
+        text.setVisible(false);
+        return text;
+      },
+      // Reset pour réinitialiser l'effet
+      (text) => {
+        text.setVisible(false);
+        text.setScale(1);
+        text.setAlpha(1);
+        this.tweens.killTweensOf(text);
+      },
+      // Taille initiale
+      10,
+      // Taille maximale
+      50
+    );
+    
+    // Pool pour les effets de dégâts
+    this.damageEffectPool = new ObjectPool<Phaser.GameObjects.Text>(
+      // Factory pour créer un nouvel effet
+      () => {
+        const text = this.add.text(0, 0, '', {
+          fontSize: '14px',
+          color: '#ff0000',
+          stroke: '#000000',
+          strokeThickness: 2
+        });
+        text.setOrigin(0.5);
+        text.setDepth(100);
+        text.setVisible(false);
+        return text;
+      },
+      // Reset pour réinitialiser l'effet
+      (text) => {
+        text.setVisible(false);
+        text.setScale(1);
+        text.setAlpha(1);
+        this.tweens.killTweensOf(text);
+      },
+      // Taille initiale
+      10,
+      // Taille maximale
+      30
+    );
   }
 } 
