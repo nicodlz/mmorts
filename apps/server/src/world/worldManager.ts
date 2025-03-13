@@ -1,4 +1,4 @@
-import { ResourceSchema, ResourceType, TILE_SIZE, CHUNK_SIZE } from "../schemas/GameState";
+import { ResourceSchema, ResourceType, TILE_SIZE, CHUNK_SIZE, RESOURCE_AMOUNTS } from "shared";
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -7,16 +7,6 @@ export interface WorldData {
   resources: Map<string, ResourceSchema>;
   resourcesByChunk: Map<string, Set<string>>;
 }
-
-// Constantes pour les quantités de ressources par type
-const RESOURCE_AMOUNTS: {[key: string]: number} = {
-  [ResourceType.GOLD]: 100,
-  [ResourceType.WOOD]: 20,
-  [ResourceType.STONE]: 75,
-  [ResourceType.IRON]: 60,
-  [ResourceType.COAL]: 40,
-  [ResourceType.STEEL]: 30
-};
 
 export function loadMap(): WorldData {
   let mapLines: string[] = [];

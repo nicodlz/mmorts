@@ -10,7 +10,8 @@ import {
   ResourceType,
   BUILDING_COSTS,
   BuildingType,
-  HARVEST_AMOUNT  // Ajouter l'importation ici
+  HARVEST_AMOUNT,
+  RESOURCE_AMOUNTS  // Ajouter l'importation ici
 } from 'shared';
 
 export class GameScene extends Phaser.Scene {
@@ -100,12 +101,7 @@ export class GameScene extends Phaser.Scene {
     cooldown: 500, // Temps en ms entre chaque collecte
     animationPhases: 3, // Nombre de phases de l'animation
     phaseSpeed: 150, // Durée de chaque phase en ms
-    lastCollectTime: 0, // Dernier temps de collecte
-    resourceAmounts: { // Quantité de ressources par type
-      'gold': 100,
-      'wood': 20,
-      'stone': 50
-    }
+    lastCollectTime: 0 // Dernier temps de collecte
   };
   
   // Propriétés pour la construction
@@ -2898,7 +2894,7 @@ export class GameScene extends Phaser.Scene {
     
     const sprite = this.add.sprite(x, y, type);
     sprite.setData('type', type);
-    sprite.setData('amount', this.miningConfig.resourceAmounts[type] || 100);
+    sprite.setData('amount', RESOURCE_AMOUNTS[type as ResourceType] || 100);
     sprite.setData('isRespawning', false);
     
     // Définir la profondeur pour s'assurer que la ressource est visible
