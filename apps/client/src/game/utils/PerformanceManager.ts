@@ -14,6 +14,8 @@ export enum QualityLevel {
 export class PerformanceManager {
   // Performance globale
   private static _qualityLevel: QualityLevel = QualityLevel.MEDIUM;
+  private static _lastQualityChange: number = 0;
+  private static _qualityChangeDelay: number = 5000; // Délai minimum entre les changements de qualité (5 secondes)
   
   // FPS
   private static _fpsHistory: number[] = [];
@@ -37,6 +39,9 @@ export class PerformanceManager {
   private static _positionThreshold: number = 0.5;
   private static _lerpFactor: number = 0.08;
   private static _effectsQuality: number = 1.0;
+  
+  // Indicateurs de changement
+  private static _parametersChanged: boolean = false;
 
   /**
    * Initialise le gestionnaire de performances
@@ -50,6 +55,9 @@ export class PerformanceManager {
         this.togglePerformanceMode();
       }
     });
+    
+    // Initialiser le timestamp du dernier changement
+    this._lastQualityChange = Date.now();
   }
 
   /**
@@ -112,11 +120,19 @@ export class PerformanceManager {
       return;
     }
     
+    // Vérifier si assez de temps s'est écoulé depuis le dernier changement
+    const now = Date.now();
+    if (now - this._lastQualityChange < this._qualityChangeDelay) {
+      return;
+    }
+    
     // Réduire la qualité si les performances sont faibles
     if (this._fpsAverage < this._fpsThresholdLow || this._pingAverage > this._pingThresholdLow) {
       if (this._qualityLevel > QualityLevel.LOW) {
         this._qualityLevel--;
         this.applyQualitySettings();
+        this._lastQualityChange = now;
+        this._parametersChanged = true;
         console.log(`Performance faible détectée: FPS = ${this._fpsAverage.toFixed(1)}, Ping = ${this._pingAverage.toFixed(0)}ms. Qualité réduite à ${QualityLevel[this._qualityLevel]}`);
       }
     } 
@@ -125,6 +141,8 @@ export class PerformanceManager {
       if (this._qualityLevel < QualityLevel.HIGH) {
         this._qualityLevel++;
         this.applyQualitySettings();
+        this._lastQualityChange = now;
+        this._parametersChanged = true;
         console.log(`Bonnes performances détectées: FPS = ${this._fpsAverage.toFixed(1)}, Ping = ${this._pingAverage.toFixed(0)}ms. Qualité augmentée à ${QualityLevel[this._qualityLevel]}`);
       }
     }
@@ -134,6 +152,9 @@ export class PerformanceManager {
    * Applique les paramètres correspondant au niveau de qualité actuel
    */
   private static applyQualitySettings() {
+    // Sauvegarder les anciennes valeurs pour détecter les changements
+    const oldRenderDistance = this._renderDistance;
+    
     switch (this._qualityLevel) {
       case QualityLevel.LOW:
         this._networkUpdateRate = 250;      // 4 fois par seconde
@@ -168,6 +189,11 @@ export class PerformanceManager {
         this._effectsQuality = 1.0;         // Tous les effets
         break;
     }
+    
+    // Détecter si le renderDistance a changé
+    if (oldRenderDistance !== this._renderDistance) {
+      console.log(`Changement de renderDistance: ${oldRenderDistance} -> ${this._renderDistance}`);
+    }
   }
 
   /**
@@ -177,7 +203,19 @@ export class PerformanceManager {
     // Faire défiler les niveaux de qualité
     this._qualityLevel = (this._qualityLevel + 1) % 3;
     this.applyQualitySettings();
+    this._lastQualityChange = Date.now();
+    this._parametersChanged = true;
     console.log(`Mode de performance changé à ${QualityLevel[this._qualityLevel]}`);
+  }
+
+  /**
+   * Vérifie si les paramètres ont changé depuis le dernier appel
+   * @returns true si les paramètres ont changé, false sinon
+   */
+  public static checkParametersChanged(): boolean {
+    const changed = this._parametersChanged;
+    this._parametersChanged = false;
+    return changed;
   }
 
   // Getters pour les paramètres

@@ -560,6 +560,9 @@ export class GameScene extends Phaser.Scene {
       this.updateDynamicParameters();
     }
     
+    // Nettoyage des tuiles éloignées (appelé à intervalles réguliers)
+    this.cleanupDistantTiles(time);
+    
     // Déterminer le chunk actuel du joueur
     const playerChunkX = Math.floor(this.actualX / (this.tileSize * this.CHUNK_SIZE));
     const playerChunkY = Math.floor(this.actualY / (this.tileSize * this.CHUNK_SIZE));
@@ -610,7 +613,7 @@ export class GameScene extends Phaser.Scene {
     }
     this.lastCursorMode = this.isToolMode;
     
-    // Mettre à jour l'animation de l'outil (AJOUT CRITIQUE)
+    // Mettre à jour l'animation de l'outil (une seule fois)
     this.updateToolAnimation(time, delta);
     
     // Mettre à jour la position du nom du joueur
@@ -659,9 +662,6 @@ export class GameScene extends Phaser.Scene {
       });
     }
     
-    // Mettre à jour les animations d'outils
-    this.updateToolAnimation(time, delta);
-    
     // Mettre à jour le minage
     this.updateMining(time);
     
@@ -705,8 +705,8 @@ export class GameScene extends Phaser.Scene {
       this.hideDeathScreen();
     }
     
-    // Adapter la taille des pools en fonction de la qualité
-    if (this.textEffectPool && this.damageEffectPool) {
+    // Adapter la taille des pools en fonction de la qualité (moins fréquemment)
+    if (this.textEffectPool && this.damageEffectPool && time % 1000 < 20) {
       const maxPoolSize = Math.floor(PerformanceManager.maxTilePoolSize / 10);
       this.textEffectPool.maxPoolSize = maxPoolSize;
       this.damageEffectPool.maxPoolSize = Math.floor(maxPoolSize / 2);
@@ -2272,22 +2272,28 @@ export class GameScene extends Phaser.Scene {
   // Méthode pour nettoyer les tuiles qui ne sont plus visibles
   private cleanupDistantTiles(currentTime: number) {
     // Ne pas nettoyer trop fréquemment
-    if (currentTime - this.lastCleanupTime < PerformanceManager.cleanupInterval) return;
+    if (currentTime - this.lastCleanupTime < this.cleanupInterval) return;
     this.lastCleanupTime = currentTime;
     
     if (!this.player) return;
-    
-    console.log("Nettoyage des tuiles éloignées");
     
     // Calculer les coordonnées du chunk sur lequel se trouve le joueur
     const playerChunkX = Math.floor(this.player.x / (this.tileSize * this.CHUNK_SIZE));
     const playerChunkY = Math.floor(this.player.y / (this.tileSize * this.CHUNK_SIZE));
     
-    // Distance maximale pour le nettoyage (plus grande que renderDistance pour éviter les nettoyages fréquents)
+    // Distance maximale pour le nettoyage (1 chunk de plus que renderDistance)
     const cleanupDistance = this.renderDistance + 1;
     
-    // Parcourir toutes les tuiles chargées
-    this.tileLayers.forEach((tile, key) => {
+    // Utiliser un compteur pour limiter le nombre de tuiles traitées par cycle
+    // afin d'éviter des pics de performance
+    let tilesProcessed = 0;
+    const maxTilesPerCycle = 200; // Nombre maximal de tuiles à traiter à chaque appel
+    
+    // Parcourir les tuiles chargées
+    for (const [key, tile] of this.tileLayers.entries()) {
+      // Limiter le nombre de tuiles traitées par cycle
+      if (tilesProcessed >= maxTilesPerCycle) break;
+      
       // Extraire les coordonnées de la clé (format "x,y")
       const [tileX, tileY] = key.split(',').map(Number);
       
@@ -2305,7 +2311,9 @@ export class GameScene extends Phaser.Scene {
       if (distance > cleanupDistance) {
         // Ajouter la tuile au pool pour réutilisation
         if (this.tilePool.length < this.maxTilePoolSize) {
+          // Réinitialiser les propriétés importantes pour réduire la mémoire
           tile.setVisible(false);
+          tile.setActive(false);
           this.tilePool.push(tile);
         } else {
           tile.destroy();
@@ -2314,8 +2322,14 @@ export class GameScene extends Phaser.Scene {
         // Supprimer la référence
         this.tileLayers.delete(key);
         this.loadedTiles.delete(key);
+        tilesProcessed++;
       }
-    });
+    }
+    
+    // Log des statistiques uniquement en cas de nettoyage substantiel
+    if (tilesProcessed > 0) {
+      console.log(`Nettoyage des tuiles: ${tilesProcessed} tuiles nettoyées, ${this.tileLayers.size} tuiles restantes, ${this.tilePool.length}/${this.maxTilePoolSize} dans le pool`);
+    }
   }
 
   // Pour toute référence restante à updateVisibleTiles
@@ -2328,10 +2342,19 @@ export class GameScene extends Phaser.Scene {
 
   // Méthode de chargement de la carte par chunks
   private updateVisibleChunks(playerChunkX: number, playerChunkY: number) {
-    console.log(`Mise à jour des chunks visibles autour de (${playerChunkX}, ${playerChunkY})`);
+    // Définir l'interface pour les chunks
+    interface ChunkInfo {
+      chunkX: number;
+      chunkY: number;
+      chunkKey: string;
+      distance: number;
+    }
     
     // Calculer les chunks à charger
     const chunksToLoad = new Set<string>();
+    const newChunksToLoad: ChunkInfo[] = []; // Tableau pour les nouveaux chunks à charger
+    
+    // Commencer par marquer les chunks qui devraient être visibles
     for (let dy = -this.renderDistance; dy <= this.renderDistance; dy++) {
       for (let dx = -this.renderDistance; dx <= this.renderDistance; dx++) {
         const chunkX = playerChunkX + dx;
@@ -2339,20 +2362,71 @@ export class GameScene extends Phaser.Scene {
         const chunkKey = `${chunkX},${chunkY}`;
         chunksToLoad.add(chunkKey);
         
-        // Si le chunk n'est pas déjà chargé, le charger
+        // Si le chunk n'est pas déjà chargé, l'ajouter à la liste de chargement
         if (!this.loadedChunks.has(chunkKey)) {
-          this.loadChunk(chunkX, chunkY);
-          this.loadedChunks.add(chunkKey);
+          // Calculer la distance par rapport au joueur (manhattan) pour priorisation
+          const distance = Math.abs(dx) + Math.abs(dy);
+          newChunksToLoad.push({ 
+            chunkX, 
+            chunkY, 
+            chunkKey, 
+            distance 
+          });
         }
       }
     }
     
-    // Décharger les chunks trop éloignés
-    for (const chunkKey of Array.from(this.loadedChunks)) {
-      if (!chunksToLoad.has(chunkKey)) {
-        this.unloadChunk(chunkKey);
-        this.loadedChunks.delete(chunkKey);
+    // Trier les nouveaux chunks à charger par distance (les plus proches d'abord)
+    newChunksToLoad.sort((a, b) => a.distance - b.distance);
+    
+    // Limiter le nombre de nouveaux chunks à charger par frame pour éviter les pics
+    const maxChunksPerUpdate = Math.max(1, Math.ceil(PerformanceManager.qualityLevel));
+    const chunksToProcess = newChunksToLoad.slice(0, maxChunksPerUpdate);
+    
+    // Charger les chunks priorisés
+    for (const chunk of chunksToProcess) {
+      this.loadChunk(chunk.chunkX, chunk.chunkY);
+      this.loadedChunks.add(chunk.chunkKey);
+      
+      console.log(`Chunk chargé: (${chunk.chunkX}, ${chunk.chunkY}), distance: ${chunk.distance}`);
+    }
+    
+    // Si d'autres chunks restent à charger, les planifier pour le prochain update
+    if (newChunksToLoad.length > chunksToProcess.length) {
+      const remainingChunks = newChunksToLoad.length - chunksToProcess.length;
+      console.log(`${remainingChunks} chunks restants à charger lors des prochains updates`);
+      
+      // Programmer le chargement des chunks restants sur plusieurs frames
+      if (remainingChunks > 0) {
+        this.time.delayedCall(100, () => {
+          // Forcer une mise à jour des chunks au prochain update
+          this.lastLoadedChunkX = -999;
+          this.lastLoadedChunkY = -999;
+        });
       }
+    }
+    
+    // Décharger les chunks trop éloignés - limiter le nombre par frame également
+    const chunksToUnload: string[] = [];
+    for (const chunkKey of this.loadedChunks) {
+      if (!chunksToLoad.has(chunkKey)) {
+        chunksToUnload.push(chunkKey);
+      }
+    }
+    
+    // Limiter le nombre de chunks à décharger par frame également
+    const maxUnloadPerUpdate = maxChunksPerUpdate;
+    const unloadToProcess = chunksToUnload.slice(0, maxUnloadPerUpdate);
+    
+    // Décharger les chunks
+    for (const chunkKey of unloadToProcess) {
+      this.unloadChunk(chunkKey);
+      this.loadedChunks.delete(chunkKey);
+    }
+    
+    // Si d'autres chunks restent à décharger, les planifier pour le prochain update
+    if (chunksToUnload.length > unloadToProcess.length) {
+      console.log(`${chunksToUnload.length - unloadToProcess.length} chunks restants à décharger lors des prochains updates`);
     }
     
     console.log(`Chunks chargés: ${this.loadedChunks.size}`);
@@ -2364,7 +2438,17 @@ export class GameScene extends Phaser.Scene {
     const startTileX = chunkX * this.CHUNK_SIZE;
     const startTileY = chunkY * this.CHUNK_SIZE;
     
-    // Charger les tuiles du chunk
+    // Définir l'interface pour les tuiles
+    interface TileInfo {
+      worldTileX: number;
+      worldTileY: number;
+      distanceToCenter: number;
+    }
+    
+    // Créer un tableau de tuiles à charger
+    const tilesToLoad: TileInfo[] = [];
+    
+    // Préparer les tuiles du chunk
     for (let y = 0; y < this.CHUNK_SIZE; y++) {
       const worldTileY = startTileY + y;
       if (worldTileY < 0 || worldTileY >= this.mapLines.length) continue;
@@ -2373,9 +2457,43 @@ export class GameScene extends Phaser.Scene {
         const worldTileX = startTileX + x;
         if (worldTileX < 0 || worldTileX >= this.mapLines[worldTileY].length) continue;
         
-        // Utiliser notre méthode existante de création de tuile
-        this.createTileAt(worldTileX, worldTileY);
+        // Vérifier si la tuile est déjà chargée
+        const tileKey = `${worldTileX},${worldTileY}`;
+        if (!this.loadedTiles.has(tileKey)) {
+          // Calculer la distance au centre du chunk pour prioriser
+          const distanceToCenter = Math.abs(x - this.CHUNK_SIZE/2) + Math.abs(y - this.CHUNK_SIZE/2);
+          tilesToLoad.push({
+            worldTileX,
+            worldTileY,
+            distanceToCenter
+          });
+        }
       }
+    }
+    
+    // Trier les tuiles par distance au centre (les plus proches d'abord)
+    tilesToLoad.sort((a, b) => a.distanceToCenter - b.distanceToCenter);
+    
+    // Limiter le nombre de tuiles à charger immédiatement
+    const maxTilesPerFrame = Math.min(tilesToLoad.length, 50);
+    const tilesToLoadNow = tilesToLoad.slice(0, maxTilesPerFrame);
+    const remainingTiles = tilesToLoad.slice(maxTilesPerFrame);
+    
+    // Charger les tuiles prioritaires immédiatement
+    for (const tile of tilesToLoadNow) {
+      this.createTileAt(tile.worldTileX, tile.worldTileY);
+    }
+    
+    // Si d'autres tuiles restent à charger, les planifier pour plus tard
+    if (remainingTiles.length > 0) {
+      console.log(`${remainingTiles.length} tuiles restantes à charger pour le chunk (${chunkX}, ${chunkY})`);
+      
+      // Charger les tuiles restantes progressivement
+      this.time.delayedCall(50, () => {
+        for (const tile of remainingTiles) {
+          this.createTileAt(tile.worldTileX, tile.worldTileY);
+        }
+      });
     }
   }
 
@@ -2396,6 +2514,7 @@ export class GameScene extends Phaser.Scene {
         if (tile) {
           if (this.tilePool.length < this.maxTilePoolSize) {
             tile.setVisible(false);
+            tile.setActive(false);
             this.tilePool.push(tile);
           } else {
             tile.destroy();
@@ -3293,7 +3412,7 @@ export class GameScene extends Phaser.Scene {
 
     // Calculer la zone visible à l'écran avec une marge
     const camera = this.cameras.main;
-    const margin = 100; // Marge en pixels pour éviter les pop-ins
+    const margin = 100 * PerformanceManager.effectsQuality; // Marge adaptative en fonction de la qualité
     
     this.visibleScreenRect.setTo(
       camera.scrollX - margin,
@@ -3303,33 +3422,60 @@ export class GameScene extends Phaser.Scene {
     );
 
     // Optimiser les ressources (activer/désactiver selon visibilité)
-    this.resourceSprites.forEach((sprite, id) => {
-      const isVisible = this.visibleScreenRect.contains(sprite.x, sprite.y);
-      sprite.setVisible(isVisible);
-      // Ne pas mettre à jour les sprites non visibles
-      sprite.setActive(isVisible);
-    });
-
-    // Optimiser les autres joueurs
-    this.unitSprites.forEach((data) => {
-      const isVisible = this.visibleScreenRect.contains(data.sprite.x, data.sprite.y);
-      data.sprite.setVisible(isVisible);
-      // Ne pas mettre à jour les sprites non visibles
-      data.sprite.setActive(isVisible);
+    // Utiliser un compteur pour limiter le nombre d'opérations par frame
+    let operationsCount = 0;
+    const maxOperationsPerFrame = 100; // Limiter le nombre d'opérations pour éviter les pics
+    
+    // Optimiser les ressources (priorité la plus haute)
+    for (const [id, sprite] of this.resourceSprites.entries()) {
+      if (operationsCount >= maxOperationsPerFrame) break;
       
-      // Optimiser aussi le texte du nom
-      if (data.nameText) {
-        data.nameText.setVisible(isVisible);
-        data.nameText.setActive(isVisible);
-      }
-    });
-
-    // Optimiser les bâtiments
-    this.buildingSprites.forEach((sprite) => {
       const isVisible = this.visibleScreenRect.contains(sprite.x, sprite.y);
-      sprite.setVisible(isVisible);
-      sprite.setActive(isVisible);
-    });
+      if (sprite.visible !== isVisible) {
+        sprite.setVisible(isVisible);
+        sprite.setActive(isVisible);
+        operationsCount++;
+      }
+    }
+    
+    // S'il reste des opérations disponibles, optimiser les unités
+    if (operationsCount < maxOperationsPerFrame) {
+      for (const [id, data] of this.unitSprites.entries()) {
+        if (operationsCount >= maxOperationsPerFrame) break;
+        
+        const isVisible = this.visibleScreenRect.contains(data.sprite.x, data.sprite.y);
+        if (data.sprite.visible !== isVisible) {
+          data.sprite.setVisible(isVisible);
+          data.sprite.setActive(isVisible);
+          
+          // Optimiser aussi le texte du nom
+          if (data.nameText) {
+            data.nameText.setVisible(isVisible);
+            data.nameText.setActive(isVisible);
+          }
+          operationsCount++;
+        }
+      }
+    }
+
+    // S'il reste des opérations disponibles, optimiser les bâtiments
+    if (operationsCount < maxOperationsPerFrame) {
+      for (const [id, sprite] of this.buildingSprites.entries()) {
+        if (operationsCount >= maxOperationsPerFrame) break;
+        
+        const isVisible = this.visibleScreenRect.contains(sprite.x, sprite.y);
+        if (sprite.visible !== isVisible) {
+          sprite.setVisible(isVisible);
+          sprite.setActive(isVisible);
+          operationsCount++;
+        }
+      }
+    }
+    
+    // Si on a atteint la limite d'opérations, planifier une autre optimisation rapidement
+    if (operationsCount >= maxOperationsPerFrame) {
+      this.lastRenderOptimization = this.time.now - PerformanceManager.renderOptimizationInterval + 100;
+    }
   }
 
   private updateBuildingPreview(tileX: number, tileY: number) {
@@ -4302,9 +4448,27 @@ export class GameScene extends Phaser.Scene {
   // Mettre à jour les paramètres en fonction des performances
   private updateDynamicParameters() {
     // Mettre à jour les paramètres pour qu'ils correspondent aux valeurs du gestionnaire
-    this.renderDistance = PerformanceManager.renderDistance;
+    
+    // Gérer le changement de renderDistance progressivement pour éviter les pics
+    const newRenderDistance = PerformanceManager.renderDistance;
+    if (this.renderDistance !== newRenderDistance) {
+      console.log(`Changement de renderDistance: ${this.renderDistance} -> ${newRenderDistance}`);
+      // Changement progressif pour éviter les pics
+      this.renderDistance = newRenderDistance;
+      // Ne pas déclencher immédiatement un rechargement complet
+    }
+    
+    // Mettre à jour les autres paramètres
     this.maxTilePoolSize = PerformanceManager.maxTilePoolSize;
     this.cleanupInterval = PerformanceManager.cleanupInterval;
+    
+    // Mettre à jour le facteur d'interpolation pour le mouvement
+    const newLerpFactor = PerformanceManager.lerpFactor;
+    if (Math.abs(this.LERP_FACTOR - newLerpFactor) > 0.01) {
+      console.log(`Ajustement du facteur d'interpolation: ${this.LERP_FACTOR} -> ${newLerpFactor}`);
+      // @ts-ignore - Ignorer l'erreur readonly car nous avons besoin de l'ajuster dynamiquement
+      this.LERP_FACTOR = newLerpFactor;
+    }
   }
 
   // Initialiser les pools d'objets pour les effets visuels
