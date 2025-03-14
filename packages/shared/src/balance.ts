@@ -42,12 +42,12 @@ export const COMBAT = {
 
 // Quantités de ressources données au joueur lors de sa création
 export const PLAYER_STARTING_RESOURCES = {
-  [ResourceType.WOOD]: 0,
-  [ResourceType.STONE]: 0,
-  [ResourceType.GOLD]: 0,
-  [ResourceType.IRON]: 0,
-  [ResourceType.COAL]: 0,
-  [ResourceType.STEEL]: 0
+  [ResourceType.WOOD]: 100,
+  [ResourceType.STONE]: 100,
+  [ResourceType.GOLD]: 100,
+  [ResourceType.IRON]: 100,
+  [ResourceType.COAL]: 100,
+  [ResourceType.STEEL]: 100
 };
 
 // ====== COÛTS DE CONSTRUCTION ======

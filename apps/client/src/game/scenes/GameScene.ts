@@ -15,6 +15,8 @@ import {
 } from 'shared';
 import { PerformanceManager, QualityLevel } from '../utils/PerformanceManager';
 import { ObjectPool } from '../utils/ObjectPool';
+// Import necessaire pour MapSchema
+import { MapSchema } from "@colyseus/schema";
 
 export class GameScene extends Phaser.Scene {
   // Client Colyseus
@@ -36,6 +38,9 @@ export class GameScene extends Phaser.Scene {
   private bKey: Phaser.Input.Keyboard.Key;
   private playerSpeed: number = 3; // Vitesse réduite pour des mouvements plus fins
   
+  // État d'initialisation
+  private isInitialized: boolean = false;
+  
   // Groupes d'objets
   private resourceSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private visibleResources: Set<string> = new Set(); // Ressources actuellement visibles
@@ -47,6 +52,7 @@ export class GameScene extends Phaser.Scene {
     walkingPhase?: number;
   }> = new Map();
   private buildingSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
+  private otherPlayers: Map<string, Phaser.GameObjects.Container> = new Map(); // Autres joueurs
   
   // Stockage de la carte pour le chargement dynamique
   private mapData: string = '';
@@ -67,6 +73,7 @@ export class GameScene extends Phaser.Scene {
   // Dernière position chargée pour éviter le rechargement constant
   private lastLoadedChunkX: number = -1;
   private lastLoadedChunkY: number = -1;
+  private lastChunkLoadTime: number = 0; // Timestamp du dernier chargement de chunk
   private readonly CHUNK_SIZE: number = CHUNK_SIZE; // Utiliser la constante partagée
   
   // Ajouter ces propriétés privées dans la classe
@@ -178,6 +185,17 @@ export class GameScene extends Phaser.Scene {
   private activeTextEffects: Set<Phaser.GameObjects.Text> = new Set();
   private activeDamageEffects: Set<Phaser.GameObjects.Text> = new Set();
   
+  // Propriétés pour le TileMap
+  private map?: Phaser.Tilemaps.Tilemap;
+  private tileset?: Phaser.Tilemaps.Tileset;
+  private groundLayer?: Phaser.Tilemaps.TilemapLayer;
+  private wallLayer?: Phaser.Tilemaps.TilemapLayer;
+  private tileIndexes: { [key: string]: number } = {};
+  private tilesets: { [key: string]: Phaser.Tilemaps.Tileset } = {};
+  
+  // Flag pour savoir si nous venons de l'écran de chargement
+  private isPreloaded: boolean = false;
+  
   constructor() {
     super({ key: 'GameScene' });
     // @ts-ignore - Ignorer l'erreur de TypeScript pour import.meta.env
@@ -208,8 +226,8 @@ export class GameScene extends Phaser.Scene {
     this.load.image('player', 'sprites/player.png');
     this.load.image('pickaxe', 'sprites/pickaxe.png');
     this.load.image('gold', 'sprites/gold.png');
-    this.load.image('wood', 'sprites/tree2.png');
-    this.load.image('stone', 'sprites/stone2.png');
+    this.load.image('wood', 'sprites/tree.png');
+    this.load.image('stone', 'sprites/stone.png');
     
     // Charger les sprites des bâtiments
     this.load.image('forge', 'sprites/forge.png');
@@ -235,7 +253,7 @@ export class GameScene extends Phaser.Scene {
     console.log("Fin de la configuration du chargement");
   }
   
-  init() {
+  init(data?: any) {
     // Définir les propriétés pour un rendu optimal de texte
     
     // Configurer le mode de rendu pour le pixel art
@@ -250,6 +268,24 @@ export class GameScene extends Phaser.Scene {
     if (!this.input.keyboard) {
       console.error("Clavier non disponible");
       return;
+    }
+    
+    // Récupérer les données passées par LoadingScene si disponible
+    if (data) {
+      console.log("Données reçues de LoadingScene:", data);
+      
+      if (data.playerName) {
+        localStorage.setItem('playerName', data.playerName);
+      }
+      
+      if (data.playerHue !== undefined) {
+        localStorage.setItem('playerHue', data.playerHue.toString());
+      }
+      
+      // Flag indiquant que nous venons de l'écran de chargement
+      this.isPreloaded = !!data.preloaded;
+    } else {
+      this.isPreloaded = false;
     }
     
     // Initialiser les contrôles
@@ -436,8 +472,21 @@ export class GameScene extends Phaser.Scene {
     // Charger les tuiles autour du joueur
     this.updateVisibleTiles();
     
-    // Se connecter au serveur Colyseus avec les infos du joueur
-    await this.connectToServer(playerName, playerHue);
+    // Se connecter au serveur
+    try {
+      console.log("Tentative de connexion au serveur...");
+      const connectionSuccess = await this.connectToServer(playerName, playerHue);
+      
+      if (connectionSuccess) {
+        console.log("Connexion au serveur réussie!");
+      } else {
+        console.error("Échec de la connexion au serveur");
+        this.showErrorMessage("Impossible de se connecter au serveur. Veuillez réessayer plus tard.");
+      }
+    } catch (error) {
+      console.error("Erreur lors de la connexion au serveur:", error);
+      this.showErrorMessage("Erreur de connexion au serveur. Veuillez réessayer plus tard.");
+    }
     
     // Initialiser les écouteurs d'événements pour les ressources
     this.initializeResourceListeners();
@@ -451,21 +500,12 @@ export class GameScene extends Phaser.Scene {
     
     // Émettre un événement pour initialiser les ressources dans l'UI
     this.updateResourcesUI();
-
+    
     // Créer un groupe pour les effets numériques
     this.numericEffects = this.add.group();
     
-    // Initialiser les gestionnaires de ressources
-    this.initializeResourceListeners();
-    
     // S'assurer que les gestionnaires d'événements sont configurés correctement
     this.setupNetworkHandlers();
-    
-    // Ajouter un log pour vérifier que tout est bien initialisé
-    console.log("GameScene créée avec succès");
-    console.log("État de la room:", this.room ? "Connecté" : "Non connecté");
-    console.log("Gestionnaires réseau configurés:", 
-      this.room && this.room.onMessage ? "Oui" : "Non");
     
     // Écouter les événements de construction
     this.events.on('buildingSelected', (buildingType: string) => {
@@ -531,6 +571,45 @@ export class GameScene extends Phaser.Scene {
     
     // Ajouter des indicateurs de performance
     this.createPerformanceIndicators();
+    
+    console.log("GameScene initialisée avec succès!");
+    
+    // Vérifier si toutes les initialisations nécessaires sont faites
+    this.isInitialized = true;
+  }
+  
+  // Affiche un message d'erreur sur l'écran
+  private showErrorMessage(message: string) {
+    const width = this.cameras.main.width;
+    const height = this.cameras.main.height;
+    
+    const errorBox = this.add.rectangle(width / 2, height / 2, 400, 150, 0x000000, 0.8);
+    errorBox.setDepth(1000);
+    
+    const errorText = this.add.text(width / 2, height / 2, message, {
+      fontSize: '18px',
+      color: '#ffffff',
+      align: 'center',
+      wordWrap: { width: 380 }
+    }).setOrigin(0.5).setDepth(1001);
+    
+    const retryButton = this.add.rectangle(width / 2, height / 2 + 50, 150, 40, 0x4CAF50)
+      .setInteractive()
+      .setDepth(1001);
+    
+    const retryText = this.add.text(width / 2, height / 2 + 50, 'Réessayer', {
+      fontSize: '16px',
+      color: '#ffffff'
+    }).setOrigin(0.5).setDepth(1002);
+    
+    retryButton.on('pointerdown', () => {
+      errorBox.destroy();
+      errorText.destroy();
+      retryButton.destroy();
+      retryText.destroy();
+      
+      this.scene.restart();
+    });
   }
   
   update(time: number, delta: number) {
@@ -717,7 +796,7 @@ export class GameScene extends Phaser.Scene {
   private setupNetworkHandlers(): void {
     if (!this.room) return;
     
-    // Gestionnaire pour l'état initial du joueur
+    // Gestionnaire pour l'état initial du joueur (garder pour compatibilité)
     this.room.onStateChange((state) => {
       console.log("État du jeu reçu:", state);
       
@@ -743,6 +822,216 @@ export class GameScene extends Phaser.Scene {
     // Récupérer l'état initial
     console.log("État initial reçu:", this.room.state);
     console.log("Structure de l'état:", JSON.stringify(Object.keys(this.room.state)));
+    
+    // NOUVEAU GESTIONNAIRE: Données du joueur principal
+    this.room.onMessage("mainPlayerData", (data) => {
+      console.log("Données du joueur principal reçues:", data);
+      
+      // Si le joueur principal n'est pas encore défini
+      if (!this.playerEntity) {
+        // Créer l'objet playerEntity en émulant la structure attendue de Colyseus
+        this.playerEntity = data;
+        
+        // S'assurer que les ressources sont dans le bon format
+        if (data.resources && typeof data.resources === 'object' && !this.playerEntity.resources?.get) {
+          // Créer un objet avec la même interface que MapSchema
+          const resourcesMap = new Map();
+          // Ajouter une méthode .set au Map pour être compatible avec les attentes du code
+          resourcesMap.set = (key, value) => Map.prototype.set.call(resourcesMap, key, value);
+          // Ajouter une méthode .get au Map pour être compatible avec les attentes du code
+          resourcesMap.get = (key) => Map.prototype.get.call(resourcesMap, key);
+          
+          // Copier les ressources
+          Object.entries(data.resources).forEach(([key, value]) => {
+            resourcesMap.set(key, Number(value));
+          });
+          this.playerEntity.resources = resourcesMap;
+        }
+      } else {
+        // Mettre à jour les propriétés existantes
+        Object.keys(data).forEach(key => {
+          if (key !== 'resources') {
+            this.playerEntity[key] = data[key];
+          } else if (data.resources) {
+            // Mise à jour des ressources
+            Object.entries(data.resources).forEach(([resourceType, amount]) => {
+              if (this.playerEntity.resources && this.playerEntity.resources.set) {
+                this.playerEntity.resources.set(resourceType, Number(amount));
+              }
+            });
+          }
+        });
+      }
+      
+      // Utiliser la position initiale fournie par le serveur
+      if (this.player && !this.initialPositionSet && data.x !== undefined && data.y !== undefined) {
+        this.actualX = data.x;
+        this.actualY = data.y;
+        this.player.setPosition(data.x, data.y);
+        console.log(`Position initiale définie depuis mainPlayerData: (${data.x}, ${data.y})`);
+        this.initialPositionSet = true;
+      }
+      
+      // Mettre à jour l'interface des ressources
+      this.updateResourcesUI();
+    });
+    
+    // NOUVEAU GESTIONNAIRE: Mise à jour du joueur
+    this.room.onMessage("playerUpdate", (message) => {
+      console.log("Mise à jour du joueur reçue:", message);
+      
+      // Si c'est notre joueur
+      if (message.id === this.room.sessionId && this.playerEntity) {
+        // Mettre à jour les champs spécifiques
+        if (message.changes) {
+          message.changes.forEach(change => {
+            // Cas spécial pour les ressources
+            if (change.field === 'resources' && change.value) {
+              // Mettre à jour les ressources
+              Object.entries(change.value).forEach(([resourceType, amount]) => {
+                if (this.playerEntity.resources && this.playerEntity.resources.set) {
+                  this.playerEntity.resources.set(resourceType, Number(amount));
+                }
+              });
+            } else {
+              this.playerEntity[change.field] = change.value;
+            }
+          });
+        }
+        
+        // Mettre à jour l'interface des ressources si nécessaire
+        this.updateResourcesUI();
+      }
+    });
+    
+    // NOUVEAU GESTIONNAIRE: Mise à jour des chunks visibles (zones d'intérêt)
+    this.room.onMessage("visibleChunksUpdated", (message) => {
+      console.log("Mise à jour des chunks visibles:", message);
+      
+      // Ajouter les nouvelles ressources
+      if (message.resources && Array.isArray(message.resources)) {
+        message.resources.forEach(resource => {
+          if (!this.resourceSprites.has(resource.id)) {
+            // Créer le sprite de la ressource
+            this.createResourceSprite(resource);
+            this.visibleResources.add(resource.id);
+          }
+        });
+      }
+      
+      // Ajouter les nouvelles entités
+      if (message.entities) {
+        // Ajouter les joueurs
+        if (message.entities.players && Array.isArray(message.entities.players)) {
+          message.entities.players.forEach(player => {
+            // Ne pas ajouter notre propre joueur
+            if (player.id !== this.room.sessionId) {
+              this.createPlayerSprite(player, player.id);
+            }
+          });
+        }
+        
+        // Ajouter les unités
+        if (message.entities.units && Array.isArray(message.entities.units)) {
+          message.entities.units.forEach(unit => {
+            if (!this.unitSprites.has(unit.id)) {
+              this.createUnitSprite(unit, unit.id);
+            }
+          });
+        }
+        
+        // Ajouter les bâtiments
+        if (message.entities.buildings && Array.isArray(message.entities.buildings)) {
+          message.entities.buildings.forEach(building => {
+            if (!this.buildingSprites.has(building.id)) {
+              // Créer le sprite du bâtiment (méthode à implémenter)
+              this.createBuildingSprite(building);
+            }
+          });
+        }
+      }
+      
+      // Supprimer les entités qui ne sont plus visibles (dans les chunks supprimés)
+      if (message.removed && Array.isArray(message.removed)) {
+        // Pour l'instant, on ne supprime que les ressources des chunks invisibles
+        // Les autres entités sont gérées par le filtrage de Colyseus
+        this.cleanupInvisibleResources(message.removed);
+      }
+    });
+    
+    // NOUVEAU GESTIONNAIRE: Entités initiales
+    this.room.onMessage("initialEntities", (message) => {
+      console.log("Entités initiales reçues:", message);
+      
+      // Ajouter les joueurs
+      if (message.players && Array.isArray(message.players)) {
+        message.players.forEach(player => {
+          // Ne pas ajouter notre propre joueur
+          if (player.id !== this.room.sessionId) {
+            this.createPlayerSprite(player, player.id);
+          }
+        });
+      }
+      
+      // Ajouter les unités
+      if (message.units && Array.isArray(message.units)) {
+        message.units.forEach(unit => {
+          if (!this.unitSprites.has(unit.id)) {
+            this.createUnitSprite(unit, unit.id);
+          }
+        });
+      }
+      
+      // Ajouter les bâtiments
+      if (message.buildings && Array.isArray(message.buildings)) {
+        message.buildings.forEach(building => {
+          if (!this.buildingSprites.has(building.id)) {
+            // Créer le sprite du bâtiment
+            this.createBuildingSprite(building);
+          }
+        });
+      }
+    });
+    
+    // MISE À JOUR DU GESTIONNAIRE: Positions des joueurs (format multiple)
+    this.room.onMessage("playerPositions", (message) => {
+      if (message.players && Array.isArray(message.players)) {
+        message.players.forEach(playerData => {
+          const sessionId = playerData.sessionId;
+          const playerContainer = this.otherPlayers.get(sessionId);
+          
+          if (playerContainer) {
+            // Mettre à jour la position cible pour une interpolation fluide
+            playerContainer.data.set('targetX', playerData.x);
+            playerContainer.data.set('targetY', playerData.y);
+          }
+        });
+      }
+    });
+    
+    // Gestionnaire pour les mises à jour des bâtiments
+    this.room.onMessage("buildingUpdates", (message) => {
+      if (message.buildings && Array.isArray(message.buildings)) {
+        message.buildings.forEach(building => {
+          const buildingSprite = this.buildingSprites.get(building.id);
+          if (buildingSprite) {
+            // Mettre à jour la barre de progression si nécessaire
+            if (building.productionProgress !== undefined) {
+              buildingSprite.data.set('productionProgress', building.productionProgress);
+            }
+            
+            // Mettre à jour la santé si nécessaire
+            if (building.health !== undefined) {
+              buildingSprite.data.set('health', building.health);
+              buildingSprite.data.set('maxHealth', building.maxHealth);
+            }
+          } else {
+            // Si le bâtiment n'existe pas encore, le créer
+            this.createBuildingSprite(building);
+          }
+        });
+      }
+    });
     
     // Gestionnaires d'événements pour les messages du serveur
     this.room.onMessage("playerJoined", (message) => {
@@ -836,6 +1125,80 @@ export class GameScene extends Phaser.Scene {
       // Alerte de santé critique si besoin (moins de 30% de santé)
       if (data.health < data.maxHealth * 0.3) {
         this.showCriticalHealthWarning();
+      }
+    });
+    
+    // Écouter les attaques réussies du joueur pour montrer les dégâts côté attaquant
+    this.room.onMessage("attackSuccess", (data: any) => {
+      console.log("Attaque réussie:", data);
+      
+      // Obtenir les coordonnées de la cible
+      let targetX = data.targetX;
+      let targetY = data.targetY;
+      
+      // Si on a un ID de cible, essayer de trouver sa position exacte
+      if (data.targetId) {
+        // Vérifier si c'est une unité
+        const unitTarget = this.unitSprites.get(data.targetId);
+        if (unitTarget && unitTarget.sprite) {
+          targetX = unitTarget.sprite.x;
+          targetY = unitTarget.sprite.y;
+        } else {
+          // Vérifier si c'est un joueur
+          const playerTarget = this.unitSprites.get(data.targetId); // Les joueurs sont aussi dans unitSprites
+          if (playerTarget && playerTarget.sprite) {
+            targetX = playerTarget.sprite.x;
+            targetY = playerTarget.sprite.y;
+          }
+        }
+      }
+      
+      // Afficher l'effet de dégâts à la position de la cible
+      if (targetX !== undefined && targetY !== undefined) {
+        this.showDamageEffect(targetX, targetY, data.damage);
+      }
+    });
+    
+    // Écouter les attaques réussies des unités contrôlées par le joueur
+    this.room.onMessage("unitAttackSuccess", (data: any) => {
+      console.log("Attaque d'unité réussie:", data);
+      
+      // Obtenir l'unité attaquante pour les effets visuels
+      const attackerUnit = this.unitSprites.get(data.attackerId);
+      
+      // Obtenir les coordonnées de la cible
+      let targetX = data.targetX;
+      let targetY = data.targetY;
+      
+      // Si on a un ID de cible, essayer de trouver sa position exacte
+      if (data.targetId) {
+        // Vérifier si c'est une unité
+        const unitTarget = this.unitSprites.get(data.targetId);
+        if (unitTarget && unitTarget.sprite) {
+          targetX = unitTarget.sprite.x;
+          targetY = unitTarget.sprite.y;
+          
+          // Effet visuel pour montrer que l'unité a été touchée
+          this.addDamageFlashEffect(unitTarget.sprite, 2, 120);
+        } else {
+          // Vérifier si c'est un joueur
+          const playerTarget = this.unitSprites.get(data.targetId);
+          if (playerTarget && playerTarget.sprite) {
+            targetX = playerTarget.sprite.x;
+            targetY = playerTarget.sprite.y;
+          }
+        }
+      }
+      
+      // Afficher l'effet de dégâts à la position de la cible
+      if (targetX !== undefined && targetY !== undefined) {
+        this.showDamageEffect(targetX, targetY, data.damage);
+        
+        // Animation de l'unité attaquante
+        if (attackerUnit && attackerUnit.sprite) {
+          // Petit effet de "repoussement" lors de l'attaque pour illustrer l'impact
+          this.addContainerShakeEffect(attackerUnit.sprite, 0.3);
+        }
       }
     });
     
@@ -1736,6 +2099,14 @@ export class GameScene extends Phaser.Scene {
         console.log(`Le sprite pour l'unité ${data.unitId} existe déjà`);
       }
     });
+
+    // NOUVEAU: Diagnostiquer les messages de combat - utile pour déboguer
+    this.room.onMessage("*", (type: string, message: any) => {
+      // Ne loguer que les messages liés aux combats ou dégâts
+      if (type.includes('attack') || type.includes('damage') || type.includes('hit') || type.includes('combat')) {
+        console.log(`Message de combat reçu [${type}]:`, message);
+      }
+    });
   }
   
   // Crée un sprite pour un autre joueur
@@ -1869,9 +2240,13 @@ export class GameScene extends Phaser.Scene {
     const prevX = this.actualX;
     const prevY = this.actualY;
     
-    // Mettre à jour la position avec la précision subpixel
-    this.actualX += dx * this.playerSpeed;
-    this.actualY += dy * this.playerSpeed;
+    // Obtenir le delta time depuis la dernière frame (en secondes)
+    const delta = this.game.loop.delta / 1000;
+    
+    // Mettre à jour la position avec la précision subpixel en utilisant delta time
+    // On multiplie playerSpeed par 60 pour maintenir une vitesse similaire quand le jeu tourne à 60 FPS
+    this.actualX += dx * this.playerSpeed * delta * 60;
+    this.actualY += dy * this.playerSpeed * delta * 60;
     
     // Vérifier les collisions
     if (this.isCollisionAt(this.actualX, this.actualY)) {
@@ -1887,19 +2262,6 @@ export class GameScene extends Phaser.Scene {
     // Mettre à jour la position du container
     this.player.x = roundedX;
     this.player.y = roundedY;
-    
-    // Centrer la caméra sur le joueur avec des positions arrondies
-    this.cameras.main.centerOn(roundedX, roundedY);
-    
-    // Mettre à jour la position du texte du nom
-    const playerNameText = this.children.list.find(
-      child => child instanceof Phaser.GameObjects.Text && child.getData('playerId') === 'mainPlayer'
-    ) as Phaser.GameObjects.Text;
-    
-    if (playerNameText) {
-      playerNameText.x = roundedX;
-      playerNameText.y = roundedY - 12;
-    }
   }
   
   // Vérifier si une tuile contient un mur
@@ -1908,6 +2270,14 @@ export class GameScene extends Phaser.Scene {
     const tileX = Math.floor(x / this.tileSize);
     const tileY = Math.floor(y / this.tileSize);
     
+    // Vérifier si le TileMap est initialisé
+    if (this.wallLayer) {
+      // Utiliser le TileMap pour vérifier s'il y a un mur
+      const tile = this.wallLayer.getTileAt(tileX, tileY);
+      return tile !== null;
+    }
+    
+    // Fallback: vérifier directement dans mapLines
     // Vérifier les limites de la carte
     if (tileX < 0 || tileY < 0 || tileX >= this.mapLines[0].length || tileY >= this.mapLines.length) {
       return true; // Collision avec les limites de la carte
@@ -2143,23 +2513,58 @@ export class GameScene extends Phaser.Scene {
     
     // Vérifier que les sprites sont chargés
     const grassLoaded = this.textures.exists('grass');
+    const grass2Loaded = this.textures.exists('grass2');
+    const grass3Loaded = this.textures.exists('grass3');
     const wallLoaded = this.textures.exists('wall');
-    const woodLoaded = this.textures.exists('wood');
-    const stoneLoaded = this.textures.exists('stone');
-    const goldLoaded = this.textures.exists('gold');
     
     console.log("Sprites chargés:", {
       grass: grassLoaded,
-      wall: wallLoaded,
-      wood: woodLoaded,
-      stone: stoneLoaded,
-      gold: goldLoaded
+      grass2: grass2Loaded,
+      grass3: grass3Loaded,
+      wall: wallLoaded
     });
     
-    if (!grassLoaded || !wallLoaded || !woodLoaded || !stoneLoaded || !goldLoaded) {
+    if (!grassLoaded || !grass2Loaded || !grass3Loaded || !wallLoaded) {
       console.error("Certains sprites nécessaires ne sont pas chargés");
       return;
     }
+    
+    // Initialiser le TileMap
+    this.initTileMap();
+  }
+  
+  // Initialiser le TileMap
+  private initTileMap() {
+    // Déterminer la taille de la carte
+    const mapWidth = Math.max(...this.mapLines.map(line => line.length));
+    const mapHeight = this.mapLines.length;
+    
+    console.log(`Création du TileMap de taille ${mapWidth}x${mapHeight}`);
+    
+    // Créer un TileMap vide
+    this.map = this.make.tilemap({
+      tileWidth: this.tileSize,
+      tileHeight: this.tileSize,
+      width: mapWidth,
+      height: mapHeight
+    });
+    
+    // Utiliser la méthode de création de tileset dynamique
+    this.createDynamicTileset();
+    
+    // Vérifier que les couches ont été créées
+    if (!this.groundLayer || !this.wallLayer) {
+      console.error("Les couches du TileMap n'ont pas été créées");
+      return;
+    }
+    
+    // Remplir la couche de sol avec de l'herbe par défaut
+    this.groundLayer.fill(this.tileIndexes['grass']);
+    
+    // Charger les chunks initiaux autour du joueur
+    this.updateVisibleTiles();
+    
+    console.log("TileMap initialisé avec succès");
   }
   
   // Log le contenu du fichier map pour débogage
@@ -2244,7 +2649,89 @@ export class GameScene extends Phaser.Scene {
       // Configuration des gestionnaires d'événements Colyseus
       this.setupNetworkHandlers();
       
-      return true;
+      // Attendre la réception des données initiales
+      return await new Promise<boolean>((resolve) => {
+        // Variables pour suivre la réception des messages critiques
+        let mainPlayerDataReceived = false;
+        let initialResourcesReceived = false;
+        let initialEntitiesReceived = false;
+        let initializationCompleteReceived = false;
+        
+        // Définir un timeout de sécurité (8 secondes)
+        const timeout = setTimeout(() => {
+          console.warn("Timeout d'attente des données initiales - passage en mode dégradé");
+          resolve(true); // Continuer malgré tout pour éviter le blocage complet
+        }, 8000);
+        
+        // Vérifier si nous avons reçu toutes les données nécessaires
+        const checkInitDataComplete = () => {
+          console.log(`État de la réception des données: 
+            MainPlayer=${mainPlayerDataReceived}, 
+            Resources=${initialResourcesReceived}, 
+            Entities=${initialEntitiesReceived}, 
+            Complete=${initializationCompleteReceived}`);
+          
+          // Si nous avons reçu le message d'initialisation complète, c'est suffisant
+          if (initializationCompleteReceived) {
+            clearTimeout(timeout);
+            console.log("Initialisation confirmée par le serveur");
+            resolve(true);
+            return;
+          }
+          
+          // Vérifier si on a reçu les données critiques (joueur principal et ressources)
+          if (mainPlayerDataReceived && initialResourcesReceived) {
+            clearTimeout(timeout);
+            console.log("Données critiques reçues - initiation complète");
+            resolve(true);
+            return;
+          }
+          
+          // Vérifier le cas des données traditionnelles si le nouveau système échoue
+          if (this.playerEntity && initialResourcesReceived && initialEntitiesReceived) {
+            clearTimeout(timeout);
+            console.log("Données traditionnelles reçues - initiation complète");
+            resolve(true);
+          }
+        };
+        
+        // Handler pour les données du joueur principal
+        const onMainPlayerData = (data) => {
+          console.log("Données du joueur principal reçues");
+          mainPlayerDataReceived = true;
+          this.room.onMessage("mainPlayerData", onMainPlayerData, false); // Se désabonner
+          checkInitDataComplete();
+        };
+        
+        // Handler temporaire pour les ressources initiales
+        const onInitialResources = (data) => {
+          console.log(`Ressources initiales reçues: ${data.length} ressources`);
+          initialResourcesReceived = true;
+          this.room.onMessage("initialResources", onInitialResources, false); // Se désabonner
+          checkInitDataComplete();
+        };
+        
+        // Handler temporaire pour les entités initiales
+        const onInitialEntities = (data) => {
+          console.log("Entités initiales reçues");
+          initialEntitiesReceived = true;
+          this.room.onMessage("initialEntities", onInitialEntities, false); // Se désabonner
+          checkInitDataComplete();
+        };
+        
+        // Handler pour le message de confirmation d'initialisation complète
+        const onInitializationComplete = (data) => {
+          console.log("Message de confirmation d'initialisation reçu:", data);
+          initializationCompleteReceived = true;
+          this.room.onMessage("initializationComplete", onInitializationComplete, false); // Se désabonner
+          checkInitDataComplete();
+        };
+        
+        // S'abonner aux messages pour les données initiales
+        this.room.onMessage("initialResources", onInitialResources);
+        this.room.onMessage("initialEntities", onInitialEntities);
+        this.room.onMessage("initializationComplete", onInitializationComplete);
+      });
     } catch (e) {
       console.error("Erreur de connexion:", e);
       return false;
@@ -2271,184 +2758,105 @@ export class GameScene extends Phaser.Scene {
   
   // Méthode pour nettoyer les tuiles qui ne sont plus visibles
   private cleanupDistantTiles(currentTime: number) {
-    // Ne pas nettoyer trop fréquemment
-    if (currentTime - this.lastCleanupTime < this.cleanupInterval) return;
+    // Avec le TileMap, nous n'avons plus besoin de nettoyer les tuiles individuellement
+    // car les tuiles sont simplement masquées ou rendues invisibles
+    // Cette méthode est conservée pour compatibilité, mais ne fait plus rien
+    
+    // Mettre à jour le timestamp du dernier nettoyage pour éviter des appels trop fréquents
     this.lastCleanupTime = currentTime;
-    
-    if (!this.player) return;
-    
-    // Calculer les coordonnées du chunk sur lequel se trouve le joueur
-    const playerChunkX = Math.floor(this.player.x / (this.tileSize * this.CHUNK_SIZE));
-    const playerChunkY = Math.floor(this.player.y / (this.tileSize * this.CHUNK_SIZE));
-    
-    // Distance maximale pour le nettoyage (1 chunk de plus que renderDistance)
-    const cleanupDistance = this.renderDistance + 1;
-    
-    // Utiliser un compteur pour limiter le nombre de tuiles traitées par cycle
-    // afin d'éviter des pics de performance
-    let tilesProcessed = 0;
-    const maxTilesPerCycle = 200; // Nombre maximal de tuiles à traiter à chaque appel
-    
-    // Parcourir les tuiles chargées
-    for (const [key, tile] of this.tileLayers.entries()) {
-      // Limiter le nombre de tuiles traitées par cycle
-      if (tilesProcessed >= maxTilesPerCycle) break;
-      
-      // Extraire les coordonnées de la clé (format "x,y")
-      const [tileX, tileY] = key.split(',').map(Number);
-      
-      // Calculer le chunk de cette tuile
-      const tileChunkX = Math.floor(tileX / this.CHUNK_SIZE);
-      const tileChunkY = Math.floor(tileY / this.CHUNK_SIZE);
-      
-      // Calculer la distance en chunks au joueur
-      const distance = Math.max(
-        Math.abs(tileChunkX - playerChunkX), 
-        Math.abs(tileChunkY - playerChunkY)
-      );
-      
-      // Si la tuile est trop éloignée, la supprimer
-      if (distance > cleanupDistance) {
-        // Ajouter la tuile au pool pour réutilisation
-        if (this.tilePool.length < this.maxTilePoolSize) {
-          // Réinitialiser les propriétés importantes pour réduire la mémoire
-          tile.setVisible(false);
-          tile.setActive(false);
-          this.tilePool.push(tile);
-        } else {
-          tile.destroy();
-        }
-        
-        // Supprimer la référence
-        this.tileLayers.delete(key);
-        this.loadedTiles.delete(key);
-        tilesProcessed++;
-      }
-    }
-    
-    // Log des statistiques uniquement en cas de nettoyage substantiel
-    if (tilesProcessed > 0) {
-      console.log(`Nettoyage des tuiles: ${tilesProcessed} tuiles nettoyées, ${this.tileLayers.size} tuiles restantes, ${this.tilePool.length}/${this.maxTilePoolSize} dans le pool`);
-    }
   }
 
   // Pour toute référence restante à updateVisibleTiles
   private updateVisibleTiles() {
-    // Redirige vers la nouvelle méthode
+    // Vérifier que le joueur est initialisé
+    if (!this.player) return;
+    
+    // Calculer les coordonnées du chunk sur lequel se trouve le joueur
     const playerChunkX = Math.floor(this.actualX / (this.tileSize * this.CHUNK_SIZE));
     const playerChunkY = Math.floor(this.actualY / (this.tileSize * this.CHUNK_SIZE));
+    
+    // Mettre à jour les chunks visibles
     this.updateVisibleChunks(playerChunkX, playerChunkY);
+  }
+
+  /**
+   * Cache un chunk qui n'est plus dans la distance de rendu
+   * @param chunkX Coordonnée X du chunk
+   * @param chunkY Coordonnée Y du chunk
+   */
+  private hideChunk(chunkX: number, chunkY: number) {
+    const chunkKey = `${chunkX},${chunkY}`;
+    
+    // Vérifier que le chunk est chargé
+    if (!this.loadedChunks.has(chunkKey)) return;
+    
+    // Avec le TileMap, nous n'avons pas besoin de supprimer les tuiles
+    // Nous pouvons simplement les rendre invisibles ou les masquer
+    
+    // Marquer le chunk comme toujours chargé mais non visible
+    // Si nous voulons vraiment décharger les chunks, nous pourrions
+    // implémenter une logique supplémentaire ici
+    
+    console.log(`Chunk caché: (${chunkX}, ${chunkY})`);
   }
 
   // Méthode de chargement de la carte par chunks
   private updateVisibleChunks(playerChunkX: number, playerChunkY: number) {
-    // Définir l'interface pour les chunks
-    interface ChunkInfo {
-      chunkX: number;
-      chunkY: number;
-      chunkKey: string;
-      distance: number;
-    }
+    // Obtenir la distance de rendu depuis le gestionnaire de performance
+    const renderDistance = this.renderDistance; // Utiliser la propriété existante
     
-    // Calculer les chunks à charger
-    const chunksToLoad = new Set<string>();
-    const newChunksToLoad: ChunkInfo[] = []; // Tableau pour les nouveaux chunks à charger
+    // Créer un ensemble pour suivre les chunks qui doivent être visibles
+    const visibleChunks = new Set<string>();
     
-    // Commencer par marquer les chunks qui devraient être visibles
-    for (let dy = -this.renderDistance; dy <= this.renderDistance; dy++) {
-      for (let dx = -this.renderDistance; dx <= this.renderDistance; dx++) {
+    // Parcourir tous les chunks dans la distance de rendu
+    for (let dx = -renderDistance; dx <= renderDistance; dx++) {
+      for (let dy = -renderDistance; dy <= renderDistance; dy++) {
         const chunkX = playerChunkX + dx;
         const chunkY = playerChunkY + dy;
         const chunkKey = `${chunkX},${chunkY}`;
-        chunksToLoad.add(chunkKey);
         
-        // Si le chunk n'est pas déjà chargé, l'ajouter à la liste de chargement
+        // Ajouter ce chunk à l'ensemble des chunks visibles
+        visibleChunks.add(chunkKey);
+        
+        // Charger le chunk s'il n'est pas déjà chargé
         if (!this.loadedChunks.has(chunkKey)) {
-          // Calculer la distance par rapport au joueur (manhattan) pour priorisation
-          const distance = Math.abs(dx) + Math.abs(dy);
-          newChunksToLoad.push({ 
-            chunkX, 
-            chunkY, 
-            chunkKey, 
-            distance 
-          });
+          this.loadChunk(chunkX, chunkY);
         }
       }
     }
     
-    // Trier les nouveaux chunks à charger par distance (les plus proches d'abord)
-    newChunksToLoad.sort((a, b) => a.distance - b.distance);
-    
-    // Limiter le nombre de nouveaux chunks à charger par frame pour éviter les pics
-    const maxChunksPerUpdate = Math.max(1, Math.ceil(PerformanceManager.qualityLevel));
-    const chunksToProcess = newChunksToLoad.slice(0, maxChunksPerUpdate);
-    
-    // Charger les chunks priorisés
-    for (const chunk of chunksToProcess) {
-      this.loadChunk(chunk.chunkX, chunk.chunkY);
-      this.loadedChunks.add(chunk.chunkKey);
-      
-      console.log(`Chunk chargé: (${chunk.chunkX}, ${chunk.chunkY}), distance: ${chunk.distance}`);
-    }
-    
-    // Si d'autres chunks restent à charger, les planifier pour le prochain update
-    if (newChunksToLoad.length > chunksToProcess.length) {
-      const remainingChunks = newChunksToLoad.length - chunksToProcess.length;
-      console.log(`${remainingChunks} chunks restants à charger lors des prochains updates`);
-      
-      // Programmer le chargement des chunks restants sur plusieurs frames
-      if (remainingChunks > 0) {
-        this.time.delayedCall(100, () => {
-          // Forcer une mise à jour des chunks au prochain update
-          this.lastLoadedChunkX = -999;
-          this.lastLoadedChunkY = -999;
-        });
+    // Parcourir tous les chunks chargés et cacher ceux qui ne sont plus visibles
+    for (const chunkKey of this.loadedChunks.keys()) {
+      if (!visibleChunks.has(chunkKey)) {
+        // Marquer le chunk comme non visible
+        const [chunkX, chunkY] = chunkKey.split(',').map(Number);
+        this.hideChunk(chunkX, chunkY);
       }
     }
     
-    // Décharger les chunks trop éloignés - limiter le nombre par frame également
-    const chunksToUnload: string[] = [];
-    for (const chunkKey of this.loadedChunks) {
-      if (!chunksToLoad.has(chunkKey)) {
-        chunksToUnload.push(chunkKey);
-      }
-    }
-    
-    // Limiter le nombre de chunks à décharger par frame également
-    const maxUnloadPerUpdate = maxChunksPerUpdate;
-    const unloadToProcess = chunksToUnload.slice(0, maxUnloadPerUpdate);
-    
-    // Décharger les chunks
-    for (const chunkKey of unloadToProcess) {
-      this.unloadChunk(chunkKey);
-      this.loadedChunks.delete(chunkKey);
-    }
-    
-    // Si d'autres chunks restent à décharger, les planifier pour le prochain update
-    if (chunksToUnload.length > unloadToProcess.length) {
-      console.log(`${chunksToUnload.length - unloadToProcess.length} chunks restants à décharger lors des prochains updates`);
-    }
-    
-    console.log(`Chunks chargés: ${this.loadedChunks.size}`);
+    // Mettre à jour le timestamp du dernier nettoyage
+    this.lastCleanupTime = this.time.now;
   }
 
   // Charger un chunk spécifique
   private loadChunk(chunkX: number, chunkY: number) {
+    // Vérifier que le TileMap est initialisé
+    if (!this.map || !this.groundLayer || !this.wallLayer) {
+      console.error("TileMap non initialisé");
+      return;
+    }
+    
+    const chunkKey = `${chunkX},${chunkY}`;
+    
+    // Vérifier que le chunk n'est pas déjà chargé
+    if (this.loadedChunks.has(chunkKey)) return;
+    
     console.log(`Chargement du chunk (${chunkX}, ${chunkY})`);
+    
     const startTileX = chunkX * this.CHUNK_SIZE;
     const startTileY = chunkY * this.CHUNK_SIZE;
     
-    // Définir l'interface pour les tuiles
-    interface TileInfo {
-      worldTileX: number;
-      worldTileY: number;
-      distanceToCenter: number;
-    }
-    
-    // Créer un tableau de tuiles à charger
-    const tilesToLoad: TileInfo[] = [];
-    
-    // Préparer les tuiles du chunk
+    // Parcourir toutes les tuiles du chunk
     for (let y = 0; y < this.CHUNK_SIZE; y++) {
       const worldTileY = startTileY + y;
       if (worldTileY < 0 || worldTileY >= this.mapLines.length) continue;
@@ -2457,44 +2865,25 @@ export class GameScene extends Phaser.Scene {
         const worldTileX = startTileX + x;
         if (worldTileX < 0 || worldTileX >= this.mapLines[worldTileY].length) continue;
         
-        // Vérifier si la tuile est déjà chargée
-        const tileKey = `${worldTileX},${worldTileY}`;
-        if (!this.loadedTiles.has(tileKey)) {
-          // Calculer la distance au centre du chunk pour prioriser
-          const distanceToCenter = Math.abs(x - this.CHUNK_SIZE/2) + Math.abs(y - this.CHUNK_SIZE/2);
-          tilesToLoad.push({
-            worldTileX,
-            worldTileY,
-            distanceToCenter
-          });
+        // Récupérer le caractère de la carte
+        const tileChar = this.mapLines[worldTileY][worldTileX];
+        
+        // Approche simplifiée : toujours mettre de l'herbe standard sur la couche de sol
+        this.groundLayer.putTileAt(0, worldTileX, worldTileY, false);
+        
+        // Si c'est un mur, ajouter une tuile de mur dans la couche de murs
+        if (tileChar === '#') {
+          this.wallLayer.putTileAt(0, worldTileX, worldTileY, false);
         }
+        
+        // Marquer la tuile comme chargée
+        const tileKey = `${worldTileX},${worldTileY}`;
+        this.loadedTiles.add(tileKey);
       }
     }
     
-    // Trier les tuiles par distance au centre (les plus proches d'abord)
-    tilesToLoad.sort((a, b) => a.distanceToCenter - b.distanceToCenter);
-    
-    // Limiter le nombre de tuiles à charger immédiatement
-    const maxTilesPerFrame = Math.min(tilesToLoad.length, 50);
-    const tilesToLoadNow = tilesToLoad.slice(0, maxTilesPerFrame);
-    const remainingTiles = tilesToLoad.slice(maxTilesPerFrame);
-    
-    // Charger les tuiles prioritaires immédiatement
-    for (const tile of tilesToLoadNow) {
-      this.createTileAt(tile.worldTileX, tile.worldTileY);
-    }
-    
-    // Si d'autres tuiles restent à charger, les planifier pour plus tard
-    if (remainingTiles.length > 0) {
-      console.log(`${remainingTiles.length} tuiles restantes à charger pour le chunk (${chunkX}, ${chunkY})`);
-      
-      // Charger les tuiles restantes progressivement
-      this.time.delayedCall(50, () => {
-        for (const tile of remainingTiles) {
-          this.createTileAt(tile.worldTileX, tile.worldTileY);
-        }
-      });
-    }
+    // Marquer le chunk comme chargé
+    this.loadedChunks.add(chunkKey);
   }
 
   // Décharger un chunk
@@ -3410,7 +3799,7 @@ export class GameScene extends Phaser.Scene {
   private optimizeRendering() {
     if (!this.player || !this.cameras.main) return;
 
-    // Calculer la zone visible à l'écran avec une marge
+    // Calculer la zone visible à l'écran avec une marge adaptative
     const camera = this.cameras.main;
     const margin = 100 * PerformanceManager.effectsQuality; // Marge adaptative en fonction de la qualité
     
@@ -3421,10 +3810,14 @@ export class GameScene extends Phaser.Scene {
       camera.height + margin * 2
     );
 
-    // Optimiser les ressources (activer/désactiver selon visibilité)
     // Utiliser un compteur pour limiter le nombre d'opérations par frame
     let operationsCount = 0;
-    const maxOperationsPerFrame = 100; // Limiter le nombre d'opérations pour éviter les pics
+    // Adapter le nombre maximum d'opérations en fonction de la qualité et des FPS
+    const maxOperationsPerFrame = PerformanceManager.fps < 25 ? 50 : 
+                                 PerformanceManager.fps < 40 ? 75 : 100;
+    
+    // Pour les connexions très lentes, optimiser uniquement les ressources et unités les plus importantes
+    const isLowPerformance = PerformanceManager.qualityLevel === QualityLevel.LOW && PerformanceManager.fps < 25;
     
     // Optimiser les ressources (priorité la plus haute)
     for (const [id, sprite] of this.resourceSprites.entries()) {
@@ -3448,10 +3841,13 @@ export class GameScene extends Phaser.Scene {
           data.sprite.setVisible(isVisible);
           data.sprite.setActive(isVisible);
           
-          // Optimiser aussi le texte du nom
-          if (data.nameText) {
-            data.nameText.setVisible(isVisible);
-            data.nameText.setActive(isVisible);
+          // En mode performances très basses, limiter les mises à jour de textes
+          if (!isLowPerformance || isVisible) {
+            // Optimiser aussi le texte du nom
+            if (data.nameText) {
+              data.nameText.setVisible(isVisible);
+              data.nameText.setActive(isVisible);
+            }
           }
           operationsCount++;
         }
@@ -3459,7 +3855,9 @@ export class GameScene extends Phaser.Scene {
     }
 
     // S'il reste des opérations disponibles, optimiser les bâtiments
-    if (operationsCount < maxOperationsPerFrame) {
+    // En mode performances très basses, ne pas optimiser les bâtiments à chaque frame
+    const shouldOptimizeBuildings = !isLowPerformance || (this.time.now % 2 === 0);
+    if (operationsCount < maxOperationsPerFrame && shouldOptimizeBuildings) {
       for (const [id, sprite] of this.buildingSprites.entries()) {
         if (operationsCount >= maxOperationsPerFrame) break;
         
@@ -3472,9 +3870,10 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
-    // Si on a atteint la limite d'opérations, planifier une autre optimisation rapidement
-    if (operationsCount >= maxOperationsPerFrame) {
-      this.lastRenderOptimization = this.time.now - PerformanceManager.renderOptimizationInterval + 100;
+    // Si on a atteint la limite d'opérations ou si on est en mode performances basses,
+    // planifier une autre optimisation plus rapidement
+    if (operationsCount >= maxOperationsPerFrame || isLowPerformance) {
+      this.lastRenderOptimization = this.time.now - (PerformanceManager.renderOptimizationInterval / 2);
     }
   }
 
@@ -4058,27 +4457,56 @@ export class GameScene extends Phaser.Scene {
     const damageText = this.damageEffectPool.get();
     this.activeDamageEffects.add(damageText);
     
-    // Configurer l'effet
+    // Configurer l'effet avec une taille plus grande et une couleur plus visible
     damageText.setText(`-${damage}`);
-    damageText.setPosition(x, y - 20);
+    damageText.setStyle({
+      fontSize: '24px',
+      color: '#ff3333',
+      stroke: '#000000',
+      strokeThickness: 4,
+      fontStyle: 'bold',
+      shadow: {
+        offsetX: 2,
+        offsetY: 2,
+        color: '#000000',
+        blur: 2,
+        fill: true
+      }
+    });
+    
+    // Position aléatoire autour du point d'impact pour plus de dynamisme
+    const offsetX = (Math.random() - 0.5) * 20;
+    const offsetY = -20 - Math.random() * 10;
+    damageText.setPosition(x + offsetX, y + offsetY);
     damageText.setVisible(true);
     damageText.setAlpha(1);
-    damageText.setScale(1);
+    damageText.setScale(0); // Commencer petit pour l'effet de pop
     
     // Durée adaptée à la qualité
-    const duration = 1000 * PerformanceManager.effectsQuality;
+    const duration = 1200 * PerformanceManager.effectsQuality;
     
-    // Animation simplifiée en basse qualité
+    // Animation en plusieurs phases
+    // 1. Pop-in avec rotation
     this.tweens.add({
       targets: damageText,
-      y: y - (30 + 10 * PerformanceManager.effectsQuality), // Monter
-      alpha: 0, // Disparaître
-      scale: 1 + 0.5 * PerformanceManager.effectsQuality, // Grossir
-      duration: duration,
-      ease: 'Power2',
+      scale: { from: 0, to: 1.2 },
+      angle: { from: -15, to: 0 },
+      duration: 150,
+      ease: 'Back.easeOut',
       onComplete: () => {
-        this.activeDamageEffects.delete(damageText);
-        this.damageEffectPool?.release(damageText);
+        // 2. Animation de montée et disparition
+        this.tweens.add({
+          targets: damageText,
+          y: y + offsetY - 50,
+          alpha: 0,
+          scale: 0.8,
+          duration: duration,
+          ease: 'Cubic.easeOut',
+          onComplete: () => {
+            this.activeDamageEffects.delete(damageText);
+            this.damageEffectPool?.release(damageText);
+          }
+        });
       }
     });
   }
@@ -4397,17 +4825,113 @@ export class GameScene extends Phaser.Scene {
     // Sauvegarder l'opacité originale (avec cast pour éviter les erreurs de typage)
     const originalAlpha = (target as any).alpha || 1;
     
-    // Créer un tween pour le premier clignotement
+    // Appliquer une teinte rouge plus vive à la cible
+    if ((target as any).setTint) {
+      (target as any).setTint(0xff0000);
+    } else if ((target as Phaser.GameObjects.Container).list) {
+      // Si c'est un container, appliquer la teinte à tous les sprites à l'intérieur
+      (target as Phaser.GameObjects.Container).list.forEach(item => {
+        if ((item as any).setTint) {
+          (item as any).setTint(0xff0000);
+        }
+      });
+    }
+    
+    // AMÉLIORÉ: Utiliser une séquence de tweens plus visibles
+    // 1. Flash initial rapide et intense avec disparition presque complète
     this.tweens.add({
       targets: target,
-      alpha: 0.5,
-      duration: flashDuration,
-      yoyo: true, // Retour à l'état original
-      repeat: flashes - 1, // Répéter pour le nombre de clignotements spécifiés
-      ease: 'Linear',
+      alpha: 0.05, // Presque invisible pour un flash plus prononcé
+      duration: flashDuration * 0.7,
+      ease: 'Cubic.easeOut',
       onComplete: () => {
-        // S'assurer que l'alpha est restauré à sa valeur d'origine
+        // 2. Retour à une opacité normale avec un effet de rebond
+        this.tweens.add({
+          targets: target,
+          alpha: originalAlpha,
+          duration: flashDuration * 1.2,
+          ease: 'Back.easeOut',
+          onComplete: () => {
+            // Ajoutons des flashs supplémentaires si nécessaire
+            if (flashes > 1) {
+              // Créer une séquence de flashs rapides et intenses
+              this.createFlashSequence(target, originalAlpha, flashes - 1, flashDuration);
+            } else {
+              // Si pas de flashs supplémentaires, terminer l'effet
+              this.finishDamageEffect(target, originalAlpha, flashDuration);
+            }
+          }
+        });
+      }
+    });
+  }
+
+  // Nouvelle méthode pour créer une séquence de flashs rapides
+  private createFlashSequence(target: Phaser.GameObjects.GameObject, originalAlpha: number, count: number, flashDuration: number) {
+    // Pour éviter les appels récursifs qui pourraient devenir problématiques
+    let remainingFlashes = count;
+    
+    const flashSequence = () => {
+      if (remainingFlashes <= 0) {
+        this.finishDamageEffect(target, originalAlpha, flashDuration);
+        return;
+      }
+      
+      // Flash rapide d'opacité alternant entre clair et foncé
+      this.tweens.add({
+        targets: target,
+        alpha: 0.3, // Valeur médiane pour un bon contraste
+        duration: flashDuration * 0.6,
+        yoyo: true,
+        ease: 'Sine.easeInOut',
+        onComplete: () => {
+          remainingFlashes--;
+          flashSequence(); // Appel récursif contrôlé
+        }
+      });
+    };
+    
+    // Démarrer la séquence
+    flashSequence();
+  }
+
+  // Méthode auxiliaire pour finir l'effet de dégâts
+  private finishDamageEffect(target: Phaser.GameObjects.GameObject, originalAlpha: number, flashDuration: number) {
+    this.tweens.add({
+      targets: target,
+      alpha: originalAlpha,
+      duration: flashDuration,
+      ease: 'Power2.easeOut',
+      onComplete: () => {
+        // Restaurer l'alpha original
         (target as any).alpha = originalAlpha;
+        
+        // Retirer la teinte rouge avec un fade
+        if ((target as any).clearTint) {
+          this.tweens.add({
+            targets: target,
+            tint: 0xffffff,
+            duration: 200,
+            ease: 'Linear',
+            onComplete: () => {
+              (target as any).clearTint();
+            }
+          });
+        } else if ((target as Phaser.GameObjects.Container).list) {
+          (target as Phaser.GameObjects.Container).list.forEach(item => {
+            if ((item as any).clearTint) {
+              this.tweens.add({
+                targets: item,
+                tint: 0xffffff,
+                duration: 200,
+                ease: 'Linear',
+                onComplete: () => {
+                  (item as any).clearTint();
+                }
+              });
+            }
+          });
+        }
       }
     });
   }
@@ -4473,16 +4997,15 @@ export class GameScene extends Phaser.Scene {
 
   // Initialiser les pools d'objets pour les effets visuels
   private initObjectPools() {
-    // Pool pour les effets de texte numériques
+    // Pool pour les effets numériques
     this.textEffectPool = new ObjectPool<Phaser.GameObjects.Text>(
       // Factory pour créer un nouvel effet
       () => {
         const text = this.add.text(0, 0, '', {
-          fontSize: '16px',
+          fontSize: '20px',
           color: '#ffffff',
           stroke: '#000000',
-          strokeThickness: 2,
-          fontStyle: 'bold'
+          strokeThickness: 3
         });
         text.setOrigin(0.5);
         text.setDepth(100);
@@ -4529,5 +5052,163 @@ export class GameScene extends Phaser.Scene {
       // Taille maximale
       30
     );
+  }
+
+  /**
+   * Crée un tileset dynamique à partir des images individuelles
+   * Cette méthode est utilisée car nous n'avons pas de fichier tileset.png
+   */
+  private createDynamicTileset() {
+    if (!this.map) {
+      console.error("La carte n'est pas initialisée");
+      return;
+    }
+    
+    console.log("Création d'un tileset composite");
+    
+    // Créer des tilesets individuels pour chaque texture
+    const grassTileset = this.map.addTilesetImage('grass', 'grass', this.tileSize, this.tileSize, 0, 0);
+    const grass2Tileset = this.map.addTilesetImage('grass2', 'grass2', this.tileSize, this.tileSize, 0, 0);
+    const grass3Tileset = this.map.addTilesetImage('grass3', 'grass3', this.tileSize, this.tileSize, 0, 0);
+    const wallTileset = this.map.addTilesetImage('wall', 'wall', this.tileSize, this.tileSize, 0, 0);
+    
+    if (!grassTileset || !grass2Tileset || !grass3Tileset || !wallTileset) {
+      console.error("Impossible de créer un ou plusieurs tilesets");
+      return;
+    }
+    
+    // Conserver une référence à tous les tilesets
+    this.tileset = grassTileset;
+    
+    // Stocker les tilesets par nom pour un accès facile
+    this.tilesets = {
+      'grass': grassTileset,
+      'grass2': grass2Tileset,
+      'grass3': grass3Tileset,
+      'wall': wallTileset
+    };
+    
+    // Indices des tuiles - tous à 0 car chaque tileset ne contient qu'une seule image
+    this.tileIndexes = {
+      'grass': 0,
+      'grass2': 0,
+      'grass3': 0,
+      'wall': 0
+    };
+    
+    // Créer les couches avec tous les tilesets
+    const mapWidth = Math.max(...this.mapLines.map(line => line.length));
+    const mapHeight = this.mapLines.length;
+    
+    // Créer la couche de sol avec l'herbe standard
+    const groundLayer = this.map.createBlankLayer(
+      'ground', 
+      [grassTileset], 
+      0, 0, 
+      mapWidth, mapHeight
+    );
+    
+    // Créer la couche de murs avec le tileset de mur
+    const wallLayer = this.map.createBlankLayer(
+      'walls', 
+      [wallTileset], 
+      0, 0, 
+      mapWidth, mapHeight
+    );
+    
+    if (!groundLayer || !wallLayer) {
+      console.error("Impossible de créer les couches");
+      return;
+    }
+    
+    this.groundLayer = groundLayer;
+    this.wallLayer = wallLayer;
+    
+    // Définir la profondeur des couches
+    this.groundLayer.setDepth(1);
+    this.wallLayer.setDepth(5);
+    
+    console.log("Tileset composite créé avec succès");
+  }
+
+  // Créer un sprite de bâtiment
+  private createBuildingSprite(building: any) {
+    // Vérifier que le type de bâtiment est valide
+    if (!building || !building.type) {
+      console.error("Impossible de créer un sprite de bâtiment sans type:", building);
+      return;
+    }
+
+    // Récupérer la texture appropriée
+    const textureName = GameScene.BUILDING_SPRITES[building.type] || 'building_unknown';
+    
+    // Créer le sprite
+    const sprite = this.add.sprite(building.x, building.y, textureName);
+    
+    // Stocker les données du bâtiment
+    sprite.setData('id', building.id);
+    sprite.setData('type', building.type);
+    sprite.setData('owner', building.owner);
+    sprite.setData('health', building.health || 100);
+    sprite.setData('maxHealth', building.maxHealth || 100);
+    sprite.setData('productionProgress', building.productionProgress || 0);
+    sprite.setData('productionActive', building.productionActive !== undefined ? building.productionActive : true);
+    
+    // Appliquer la teinte du propriétaire
+    if (building.owner) {
+      // Récupérer la couleur du propriétaire
+      const player = this.room?.state.players.get(building.owner);
+      if (player) {
+        // Appliquer une légère teinte pour indiquer la propriété
+        sprite.setTint(this.hueToColor(player.hue));
+      }
+    }
+    
+    // Ajouter le sprite à la map des bâtiments
+    this.buildingSprites.set(building.id, sprite);
+    
+    // Rendre le bâtiment interactif
+    sprite.setInteractive();
+    
+    // Ajouter un gestionnaire de clic
+    sprite.on('pointerdown', () => {
+      this.selectBuilding(building.id);
+    });
+    
+    return sprite;
+  }
+
+  // Nettoyer les ressources invisibles dans les chunks supprimés
+  private cleanupInvisibleResources(removedChunks: string[]) {
+    // Convertir les chunks en coordonnées
+    const chunkCoords = removedChunks.map(chunk => {
+      const [x, y] = chunk.split(',').map(Number);
+      return { x, y };
+    });
+    
+    // Pour chaque ressource visible, vérifier si elle est dans un chunk supprimé
+    this.visibleResources.forEach(resourceId => {
+      const sprite = this.resourceSprites.get(resourceId);
+      if (sprite) {
+        const resourceX = sprite.x;
+        const resourceY = sprite.y;
+        
+        // Déterminer le chunk de la ressource
+        const resourceChunkX = Math.floor(resourceX / (this.tileSize * this.CHUNK_SIZE));
+        const resourceChunkY = Math.floor(resourceY / (this.tileSize * this.CHUNK_SIZE));
+        
+        // Vérifier si la ressource est dans un chunk supprimé
+        const isInRemovedChunk = chunkCoords.some(chunk => 
+          chunk.x === resourceChunkX && chunk.y === resourceChunkY
+        );
+        
+        if (isInRemovedChunk) {
+          // Supprimer le sprite de la ressource
+          sprite.destroy();
+          this.resourceSprites.delete(resourceId);
+          this.visibleResources.delete(resourceId);
+        }
+      }
+    });
   }
 } 

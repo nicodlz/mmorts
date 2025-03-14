@@ -129,7 +129,11 @@ export class MenuScene extends Phaser.Scene {
         if (this.playerName.length > 0) {
           localStorage.setItem('playerName', this.playerName);
           localStorage.setItem('playerHue', this.selectedHue.toString());
-          this.scene.start('GameScene');
+          this.scene.start('GameScene', {
+            playerName: this.playerName,
+            playerHue: this.selectedHue,
+            preloaded: true
+          });
         } else {
           // Effet de shake sur la textbox pour indiquer l'erreur
           this.tweens.add({

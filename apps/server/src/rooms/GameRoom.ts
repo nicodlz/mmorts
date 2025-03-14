@@ -43,7 +43,6 @@ class GameState extends Schema {
 
 export class GameRoom extends Room<GameState> {
   private readonly SIMULATION_INTERVAL = PERFORMANCE.SIMULATION_INTERVAL;
-  private intervalId: NodeJS.Timeout | null = null;
   private mapLines: string[] = [];
   private resourcesByChunk: Map<string, Set<string>> = new Map(); // Ressources par chunk
   
@@ -60,6 +59,14 @@ export class GameRoom extends Room<GameState> {
   }> = new Map();
   private readonly NEARBY_UPDATE_RATE = PERFORMANCE.NEARBY_UPDATE_RATE;
   private readonly DISTANT_UPDATE_RATE = PERFORMANCE.DISTANT_UPDATE_RATE;
+
+  // Nouvelles propriétés pour les Interest Areas
+  private playerVisibleChunks: Map<string, Set<string>> = new Map(); // Chunks visibles par joueur
+  private readonly INTEREST_AREA_RADIUS = 1; // Rayon en chunks pour définir la zone d'intérêt (3×3 chunks)
+  private readonly INTEREST_UPDATE_INTERVAL = 500; // Intervalle de mise à jour des zones d'intérêt en ms
+  private lastInterestUpdate: number = 0; // Timestamp de la dernière mise à jour des zones d'intérêt
+  private entityPositions: Map<string, {type: string, x: number, y: number}> = new Map(); // Position de toutes les entités
+  private entitiesByChunk: Map<string, {players: Set<string>, units: Set<string>, buildings: Set<string>}> = new Map(); // Entités par chunk
 
   onCreate(options: { worldData: { mapLines: string[], resources: Map<string, ResourceSchema>, resourcesByChunk: Map<string, Set<string>> } }) {
     // Initialiser l'état du jeu
@@ -79,8 +86,15 @@ export class GameRoom extends Room<GameState> {
     
     console.log(`GameRoom initialisée avec ${this.resources.size} ressources dans ${this.resourcesByChunk.size} chunks`);
     
-    // Créer la boucle de simulation
-    this.intervalId = setInterval(() => this.update(), this.SIMULATION_INTERVAL);
+    // Configurer le filtrage des entités (Interest Areas)
+    this.setupEntityFiltering();
+    
+    // Configurer l'intervalle de simulation
+    // Utiliser la méthode setSimulationInterval pour définir un intervalle fixe
+    this.setSimulationInterval((deltaTime) => this.update(), 16); // 60fps (1000/16)
+    
+    // S'assurer que la salle est persistante dès sa création
+    this.setRoomPersistence(true);
     
     // Configurer les gestionnaires de messages
     this.onMessage("move", (client, data) => {
@@ -97,7 +111,7 @@ export class GameRoom extends Room<GameState> {
     this.onMessage("build", (client, data) => {
       this.handleBuild(client, data);
     });
-
+    
     this.onMessage("destroyBuilding", (client, data) => {
       // Vérifier que le client est le propriétaire du bâtiment ou a le droit de le détruire
       const building = this.state.buildings.get(data.buildingId);
@@ -275,6 +289,23 @@ export class GameRoom extends Room<GameState> {
     });
   }
 
+  // Méthode pour définir la persistance de la salle
+  private setRoomPersistence(persistent: boolean) {
+    // Définir autoDispose à l'inverse de persistent
+    this.autoDispose = !persistent;
+    
+    // Si la salle doit être persistante, augmenter aussi le temps de présence
+    if (persistent) {
+      // Configurer la salle pour qu'elle persiste même sans joueurs
+      // Note: setPresentationDelay n'existe pas dans Colyseus, nous utilisons autoDispose
+      // pour contrôler si la salle doit être détruite quand elle est vide
+      
+      console.log("La salle est configurée pour être persistante, même sans joueurs");
+    } else {
+      console.log("La salle sera automatiquement détruite quand elle sera vide");
+    }
+  }
+
   // Nouveau joueur rejoint la partie
   onJoin(client: Client, options: any) {
     console.log(`Joueur ${client.sessionId} a rejoint la partie`);
@@ -332,23 +363,80 @@ export class GameRoom extends Room<GameState> {
       console.log(`- Joueur ${id}: ${p.name} à (${p.x}, ${p.y})`);
     });
     
-    // Envoyer uniquement les ressources dans les chunks proches du joueur
-    const nearbyResources = this.getResourcesInRange(player.x, player.y);
-    console.log(`Envoi de ${nearbyResources.size} ressources au nouveau joueur (sur ${this.resources.size} au total)`);
+    // Initialiser les zones d'intérêt pour ce joueur
+    this.initPlayerInterestArea(player, client.sessionId);
     
-    const resourcesData = Array.from(nearbyResources).map(id => {
-      const resource = this.resources.get(id);
-      return {
-        id: resource?.id,
-        type: resource?.type,
-        x: resource?.x,
-        y: resource?.y,
-        amount: resource?.amount
-      };
+    // Envoyer uniquement les ressources dans les chunks proches du joueur
+    // Ici on utilise directement la zone d'intérêt créée précédemment
+    const visibleChunks = this.playerVisibleChunks.get(client.sessionId) || new Set<string>();
+    const nearbyResources = this.getResourcesFromChunks([...visibleChunks]);
+    console.log(`Envoi de ${nearbyResources.length} ressources au nouveau joueur (sur ${this.resources.size} au total)`);
+    
+    // Envoyer les données du joueur principal explicitement
+    const playerResources = {};
+    // Convertir les ressources en objet simple
+    player.resources.forEach((value, key) => {
+      playerResources[key] = value;
     });
-
+    
+    client.send("mainPlayerData", {
+      id: client.sessionId,
+      x: player.x,
+      y: player.y,
+      name: player.name,
+      hue: player.hue,
+      health: player.health,
+      maxHealth: player.maxHealth,
+      population: player.population,
+      maxPopulation: player.maxPopulation,
+      isDead: player.isDead,
+      resources: playerResources
+    });
+    
     // Envoyer les ressources initiales au client
-    client.send("initialResources", resourcesData);
+    client.send("initialResources", nearbyResources);
+    
+    // Envoyer les entités visibles initiales
+    const visibleEntities = this.getEntitiesFromChunks([...visibleChunks]);
+    client.send("initialEntities", visibleEntities);
+    
+    // Envoyer un message pour confirmer que l'initialisation est terminée
+    client.send("initializationComplete", {
+      timestamp: Date.now(),
+      playerId: client.sessionId
+    });
+    
+    // Informer les autres clients qu'un nouveau joueur a rejoint
+    this.broadcast("playerJoined", {
+      sessionId: client.sessionId,
+      name: player.name,
+      x: player.x,
+      y: player.y,
+      hue: player.hue
+    }, { except: client });
+  }
+
+  // Initialiser la zone d'intérêt d'un joueur
+  private initPlayerInterestArea(player: PlayerSchema, playerId: string) {
+    const playerChunkX = Math.floor(player.x / (TILE_SIZE * CHUNK_SIZE));
+    const playerChunkY = Math.floor(player.y / (TILE_SIZE * CHUNK_SIZE));
+    
+    // Créer un ensemble de chunks visibles
+    const visibleChunks = new Set<string>();
+    
+    // Ajouter tous les chunks dans le rayon d'intérêt
+    for (let dy = -this.INTEREST_AREA_RADIUS; dy <= this.INTEREST_AREA_RADIUS; dy++) {
+      for (let dx = -this.INTEREST_AREA_RADIUS; dx <= this.INTEREST_AREA_RADIUS; dx++) {
+        const chunkKey = `${playerChunkX + dx},${playerChunkY + dy}`;
+        visibleChunks.add(chunkKey);
+      }
+    }
+    
+    // Stocker les chunks visibles pour ce joueur
+    this.playerVisibleChunks.set(playerId, visibleChunks);
+    
+    console.log(`Zone d'intérêt initialisée pour ${playerId}: ${visibleChunks.size} chunks (grille de ${this.INTEREST_AREA_RADIUS * 2 + 1}×${this.INTEREST_AREA_RADIUS * 2 + 1})`);
+    console.log(`Chunks visibles: [${Array.from(visibleChunks).join(', ')}]`);
   }
 
   // Joueur quitte la partie
@@ -359,25 +447,73 @@ export class GameRoom extends Room<GameState> {
     this.state.players.delete(client.sessionId);
     
     // Annoncer aux autres clients que le joueur est parti
-    this.broadcast("playerLeft", { sessionId: client.sessionId });
+    this.broadcast("playerLeft", {
+      sessionId: client.sessionId
+    });
     
-    // Log de débogage pour les joueurs restants
-    console.log(`Nombre de joueurs restants: ${this.state.players.size}`);
+    // Supprimer toutes les unités appartenant au joueur
+    this.removeAllUnitsFromPlayer(client.sessionId);
+    
+    // Supprimer les bâtiments appartenant au joueur (facultatif, peut être modifié selon la logique souhaitée)
+    // Si vous voulez conserver les bâtiments des joueurs déconnectés, commentez ce bloc
+    const buildingsToRemove: string[] = [];
+    this.state.buildings.forEach((building, buildingId) => {
+      if (building.owner === client.sessionId) {
+        buildingsToRemove.push(buildingId);
+      }
+    });
+    
+    buildingsToRemove.forEach(buildingId => {
+      this.handleDestroyBuilding(buildingId);
+    });
+    
+    // Supprimer les informations du joueur du système de zones d'intérêt
+    this.playerVisibleChunks.delete(client.sessionId);
+    
+    // Supprimer les taux de mise à jour du joueur
+    this.playerUpdateRates.delete(client.sessionId);
+    
+    // IMPORTANT: Ne pas nettoyer les ressources de la carte
+    // Elles doivent persister même si tous les joueurs sont déconnectés
+    
+    console.log(`Nettoyage des entités du joueur ${client.sessionId} terminé`);
+    
+    // Important: Empêcher la destruction de la salle même quand elle est vide
+    // Cette ligne est cruciale pour conserver l'état du monde
+    if (this.state.players.size === 0) {
+      console.log("La salle est vide mais nous la conservons pour préserver les ressources du monde");
+      this.autoDispose = false; // Empêcher Colyseus de disposer automatiquement de la salle
+    }
   }
 
   // Nettoyage lors de la suppression de la room
   onDispose() {
-    console.log("Room supprimée");
-    if (this.intervalId) {
-      clearInterval(this.intervalId);
-      this.intervalId = null;
-    }
+    console.log("Libération des ressources de la room");
+    
+    // Ne pas nettoyer les ressources car nous voulons qu'elles persistent
+    // même quand tous les joueurs sont déconnectés
+    // this.resources.clear();
+    // this.resourcesByChunk.clear();
+    
+    // Nettoyer seulement les entités dynamiques
+    this.entitiesByChunk.clear();
+    this.entityPositions.clear();
+    
+    console.log("Ressources de la room préservées, seules les entités dynamiques ont été nettoyées");
   }
 
   // Méthode appelée à chaque tick de simulation
   private update() {
     // Vérifier si la Room existe encore
     if (!this.state) return;
+    
+    const now = Date.now();
+
+    // Mettre à jour les zones d'intérêt périodiquement
+    if (now - this.lastInterestUpdate > this.INTEREST_UPDATE_INTERVAL) {
+      this.updateInterestAreas();
+      this.lastInterestUpdate = now;
+    }
     
     // Gérer la production des bâtiments
     this.updateProduction();
@@ -507,52 +643,46 @@ export class GameRoom extends Room<GameState> {
       }
       
       const updateData = this.playerUpdateRates.get(sessionId)!;
+      const client = this.clients.find(c => c.sessionId === sessionId);
       
-      // Parcourir les autres joueurs pour déterminer les fréquences de mise à jour
-      this.state.players.forEach((otherPlayer, otherSessionId) => {
-        if (sessionId === otherSessionId) return; // Ne pas traiter le joueur lui-même
+      if (!client) return;
+      
+      // Récupérer les chunks visibles par ce joueur
+      const visibleChunks = this.playerVisibleChunks.get(sessionId) || new Set<string>();
+      
+      // Mettre à jour les positions des joueurs visibles
+      if (now - updateData.lastPositionUpdate > this.NEARBY_UPDATE_RATE) {
+        const playerUpdates = [];
         
-        // Calculer la distance entre les joueurs
-        const distance = Math.sqrt(
-          Math.pow(player.x - otherPlayer.x, 2) + 
-          Math.pow(player.y - otherPlayer.y, 2)
-        );
-        
-        const client = this.clients.find(c => c.sessionId === sessionId);
-        if (!client) return;
-        
-        // Si le joueur est proche, mises à jour fréquentes
-        if (distance < TILE_SIZE * CHUNK_SIZE * 3) {
-          // Mettre à jour position seulement si le temps écoulé est suffisant
-          if (now - updateData.lastPositionUpdate > this.NEARBY_UPDATE_RATE) {
-            client.send("playerPosition", {
-              sessionId: otherSessionId,
-              x: otherPlayer.x,
-              y: otherPlayer.y
+        // Collecter les joueurs visibles dans les chunks d'intérêt
+        visibleChunks.forEach(chunkKey => {
+          const chunk = this.entitiesByChunk.get(chunkKey);
+          if (chunk) {
+            chunk.players.forEach(otherPlayerId => {
+              if (otherPlayerId !== sessionId) { // Ne pas inclure le joueur lui-même
+                const otherPlayer = this.state.players.get(otherPlayerId);
+                if (otherPlayer) {
+                  playerUpdates.push({
+                    sessionId: otherPlayerId,
+                    x: otherPlayer.x,
+                    y: otherPlayer.y
+                  });
+                }
+              }
             });
-            updateData.lastPositionUpdate = now;
           }
-        } 
-        // Sinon, mises à jour moins fréquentes
-        else {
-          // Mettre à jour position seulement si le temps écoulé est suffisant
-          if (now - updateData.lastPositionUpdate > this.DISTANT_UPDATE_RATE) {
-            client.send("playerPosition", {
-              sessionId: otherSessionId,
-              x: otherPlayer.x,
-              y: otherPlayer.y
-            });
-            updateData.lastPositionUpdate = now;
-          }
+        });
+        
+        // Envoyer les mises à jour des positions des joueurs
+        if (playerUpdates.length > 0) {
+          client.send("playerPositions", { players: playerUpdates });
         }
-      });
+        
+        updateData.lastPositionUpdate = now;
+      }
       
       // Mise à jour des unités - avec fréquence augmentée
-      // Augmenter à 10 fois par seconde (100ms) au lieu de 4 fois par seconde (250ms)
       if (now - updateData.lastFullUpdate > 100) {
-        const client = this.clients.find(c => c.sessionId === sessionId);
-        if (!client) return;
-        
         // Collecter toutes les unités visibles par ce joueur
         const visibleUnits = [];
         
@@ -560,21 +690,18 @@ export class GameRoom extends Room<GameState> {
         const playerOwnedUnits = Array.from(this.state.units.values())
           .filter(unit => unit.owner === sessionId);
         
-        // Ajouter les unités proches appartenant à d'autres joueurs
-        const otherUnits = Array.from(this.state.units.values())
-          .filter(unit => unit.owner !== sessionId);
-        
-        for (const unit of otherUnits) {
-          const distance = Math.sqrt(
-            Math.pow(player.x - unit.x, 2) + 
-            Math.pow(player.y - unit.y, 2)
-          );
-          
-          // Si l'unité est à portée de vision
-          if (distance < TILE_SIZE * CHUNK_SIZE * 3) {
-            visibleUnits.push(unit);
+        // Ajouter les unités dans les chunks visibles
+        visibleChunks.forEach(chunkKey => {
+          const chunk = this.entitiesByChunk.get(chunkKey);
+          if (chunk) {
+            chunk.units.forEach(unitId => {
+              const unit = this.state.units.get(unitId);
+              if (unit && unit.owner !== sessionId) { // Ne pas dupliquer les unités du joueur
+                visibleUnits.push(unit);
+              }
+            });
           }
-        }
+        });
         
         // Combiner les unités propres au joueur et les unités visibles
         const allVisibleUnits = [...playerOwnedUnits, ...visibleUnits];
@@ -586,7 +713,9 @@ export class GameRoom extends Room<GameState> {
             x: unit.x,
             y: unit.y,
             owner: unit.owner,
-            type: unit.type
+            type: unit.type,
+            health: unit.health,
+            maxHealth: unit.maxHealth
           }));
           
           client.send("unitPositions", {
@@ -597,6 +726,39 @@ export class GameRoom extends Room<GameState> {
           if (Math.random() < 0.1) { // Log seulement 10% des envois
             console.log(`Envoi de ${unitUpdates.length} positions d'unités à ${sessionId}`);
           }
+        }
+        
+        // Mettre à jour les bâtiments visibles
+        const visibleBuildings = [];
+        
+        // Ajouter les bâtiments dans les chunks visibles
+        visibleChunks.forEach(chunkKey => {
+          const chunk = this.entitiesByChunk.get(chunkKey);
+          if (chunk) {
+            chunk.buildings.forEach(buildingId => {
+              const building = this.state.buildings.get(buildingId);
+              if (building) {
+                visibleBuildings.push({
+                  id: building.id,
+                  type: building.type,
+                  owner: building.owner,
+                  x: building.x,
+                  y: building.y,
+                  health: building.health,
+                  maxHealth: building.maxHealth,
+                  productionProgress: building.productionProgress,
+                  productionActive: building.productionActive
+                });
+              }
+            });
+          }
+        });
+        
+        // Envoyer les mises à jour des bâtiments
+        if (visibleBuildings.length > 0) {
+          client.send("buildingUpdates", {
+            buildings: visibleBuildings
+          });
         }
         
         updateData.lastFullUpdate = now;
@@ -1775,5 +1937,318 @@ export class GameRoom extends Room<GameState> {
     });
     
     console.log(`${unitsToRemove.length} unités ont été supprimées`);
+  }
+
+  // Méthode pour mettre à jour les zones d'intérêt des joueurs
+  private updateInterestAreas() {
+    // Mettre à jour les positions de toutes les entités
+    this.updateEntityPositions();
+
+    // Mettre à jour les entités par chunk
+    this.updateEntitiesByChunk();
+
+    // Pour chaque joueur, mettre à jour sa zone d'intérêt
+    this.state.players.forEach((player, playerId) => {
+      this.updatePlayerInterestArea(player, playerId);
+    });
+  }
+
+  // Mettre à jour les positions de toutes les entités
+  private updateEntityPositions() {
+    // Vider la map actuelle pour éviter les entités obsolètes
+    this.entityPositions.clear();
+
+    // Enregistrer les positions des joueurs
+    this.state.players.forEach((player, playerId) => {
+      this.entityPositions.set(playerId, {
+        type: 'player',
+        x: player.x,
+        y: player.y
+      });
+    });
+
+    // Enregistrer les positions des unités
+    this.state.units.forEach((unit, unitId) => {
+      this.entityPositions.set(unitId, {
+        type: 'unit',
+        x: unit.x,
+        y: unit.y
+      });
+    });
+
+    // Enregistrer les positions des bâtiments
+    this.state.buildings.forEach((building, buildingId) => {
+      this.entityPositions.set(buildingId, {
+        type: 'building',
+        x: building.x,
+        y: building.y
+      });
+    });
+  }
+
+  // Mettre à jour les entités par chunk
+  private updateEntitiesByChunk() {
+    // Vider la map actuelle
+    this.entitiesByChunk.clear();
+
+    // Pour chaque entité, déterminer son chunk et l'ajouter à la map
+    this.entityPositions.forEach((entity, entityId) => {
+      const chunkX = Math.floor(entity.x / (TILE_SIZE * CHUNK_SIZE));
+      const chunkY = Math.floor(entity.y / (TILE_SIZE * CHUNK_SIZE));
+      const chunkKey = `${chunkX},${chunkY}`;
+
+      // Initialiser le chunk s'il n'existe pas encore
+      if (!this.entitiesByChunk.has(chunkKey)) {
+        this.entitiesByChunk.set(chunkKey, {
+          players: new Set<string>(),
+          units: new Set<string>(),
+          buildings: new Set<string>()
+        });
+      }
+
+      // Ajouter l'entité au chunk correspondant
+      const chunk = this.entitiesByChunk.get(chunkKey)!;
+      if (entity.type === 'player') {
+        chunk.players.add(entityId);
+      } else if (entity.type === 'unit') {
+        chunk.units.add(entityId);
+      } else if (entity.type === 'building') {
+        chunk.buildings.add(entityId);
+      }
+    });
+  }
+
+  // Mettre à jour la zone d'intérêt d'un joueur
+  private updatePlayerInterestArea(player: PlayerSchema, playerId: string) {
+    const playerChunkX = Math.floor(player.x / (TILE_SIZE * CHUNK_SIZE));
+    const playerChunkY = Math.floor(player.y / (TILE_SIZE * CHUNK_SIZE));
+    
+    // Créer un nouvel ensemble de chunks visibles
+    const visibleChunks = new Set<string>();
+    
+    // Ajouter tous les chunks dans le rayon d'intérêt
+    for (let dy = -this.INTEREST_AREA_RADIUS; dy <= this.INTEREST_AREA_RADIUS; dy++) {
+      for (let dx = -this.INTEREST_AREA_RADIUS; dx <= this.INTEREST_AREA_RADIUS; dx++) {
+        const chunkKey = `${playerChunkX + dx},${playerChunkY + dy}`;
+        visibleChunks.add(chunkKey);
+      }
+    }
+    
+    // Récupérer l'ancien ensemble de chunks visibles
+    const previousChunks = this.playerVisibleChunks.get(playerId) || new Set<string>();
+    
+    // Déterminer les nouveaux chunks (entrée dans la zone d'intérêt)
+    const newChunks = [...visibleChunks].filter(chunk => !previousChunks.has(chunk));
+    
+    // Déterminer les chunks qui ne sont plus visibles (sortie de la zone d'intérêt)
+    const removedChunks = [...previousChunks].filter(chunk => !visibleChunks.has(chunk));
+    
+    // Si des changements ont eu lieu, envoyer les mises à jour au client
+    if (newChunks.length > 0 || removedChunks.length > 0) {
+      console.log(`Zone d'intérêt mise à jour pour ${playerId}: ${visibleChunks.size} chunks (${newChunks.length} ajoutés, ${removedChunks.length} supprimés)`);
+      if (newChunks.length > 0) console.log(`Nouveaux chunks: [${newChunks.join(', ')}]`);
+      if (removedChunks.length > 0) console.log(`Chunks supprimés: [${removedChunks.join(', ')}]`);
+      
+      const client = this.clients.find(c => c.sessionId === playerId);
+      if (client) {
+        // Notifier les nouveaux chunks visibles
+        if (newChunks.length > 0) {
+          // Collecter les ressources des nouveaux chunks
+          const newResources = this.getResourcesFromChunks(newChunks);
+          
+          // Collecter les entités des nouveaux chunks
+          const newEntities = this.getEntitiesFromChunks(newChunks);
+          
+          // Envoyer les nouvelles entités visibles
+          client.send("visibleChunksUpdated", {
+            added: newChunks,
+            removed: removedChunks,
+            resources: newResources,
+            entities: newEntities
+          });
+        } else {
+          // Juste notifier les chunks qui ne sont plus visibles
+          client.send("visibleChunksUpdated", {
+            added: [],
+            removed: removedChunks
+          });
+        }
+      }
+    }
+    
+    // Mettre à jour les chunks visibles pour ce joueur
+    this.playerVisibleChunks.set(playerId, visibleChunks);
+  }
+
+  // Récupérer les ressources à partir d'une liste de chunks
+  private getResourcesFromChunks(chunks: string[]): any[] {
+    const resources: any[] = [];
+    
+    chunks.forEach(chunkKey => {
+      const chunkResources = this.resourcesByChunk.get(chunkKey);
+      if (chunkResources) {
+        chunkResources.forEach(resourceId => {
+          const resource = this.resources.get(resourceId);
+          if (resource) {
+            resources.push({
+              id: resource.id,
+              type: resource.type,
+              x: resource.x,
+              y: resource.y,
+              amount: resource.amount
+            });
+          }
+        });
+      }
+    });
+    
+    return resources;
+  }
+
+  // Récupérer les entités à partir d'une liste de chunks
+  private getEntitiesFromChunks(chunks: string[]): any {
+    const entities = {
+      players: [],
+      units: [],
+      buildings: []
+    };
+    
+    chunks.forEach(chunkKey => {
+      const chunk = this.entitiesByChunk.get(chunkKey);
+      if (chunk) {
+        // Récupérer les joueurs
+        chunk.players.forEach(playerId => {
+          const player = this.state.players.get(playerId);
+          if (player) {
+            entities.players.push({
+              id: playerId,
+              name: player.name,
+              x: player.x,
+              y: player.y,
+              hue: player.hue
+            });
+          }
+        });
+        
+        // Récupérer les unités
+        chunk.units.forEach(unitId => {
+          const unit = this.state.units.get(unitId);
+          if (unit) {
+            entities.units.push({
+              id: unitId,
+              type: unit.type,
+              owner: unit.owner,
+              x: unit.x,
+              y: unit.y,
+              health: unit.health,
+              maxHealth: unit.maxHealth
+            });
+          }
+        });
+        
+        // Récupérer les bâtiments
+        chunk.buildings.forEach(buildingId => {
+          const building = this.state.buildings.get(buildingId);
+          if (building) {
+            entities.buildings.push({
+              id: buildingId,
+              type: building.type,
+              owner: building.owner,
+              x: building.x,
+              y: building.y,
+              health: building.health,
+              maxHealth: building.maxHealth,
+              productionProgress: building.productionProgress,
+              productionActive: building.productionActive
+            });
+          }
+        });
+      }
+    });
+    
+    return entities;
+  }
+
+  // Configurer le filtrage des entités basé sur les zones d'intérêt
+  private setupEntityFiltering() {
+    console.log("Configuration du filtrage des entités basé sur les zones d'intérêt...");
+    
+    // Dans Colyseus, nous devons configurer le filtrage au niveau du schéma
+    // en utilisant la méthode onFilterSchema
+    this.state.players.onAdd = (player, sessionId) => {
+      console.log(`Joueur ajouté à l'état: ${sessionId}`);
+      player.onChange = (changes) => {
+        // Notifier uniquement les clients qui sont dans la zone d'intérêt
+        this.clients.forEach(client => {
+          if (client.sessionId === sessionId || this.isEntityInClientView(client.sessionId, 'player', sessionId)) {
+            this.broadcast("playerUpdate", {
+              id: sessionId,
+              changes: changes.map(change => ({
+                field: change.field,
+                value: change.value
+              }))
+            }, { clients: [client] });
+          }
+        });
+      };
+    };
+    
+    this.state.units.onAdd = (unit, unitId) => {
+      console.log(`Unité ajoutée à l'état: ${unitId}`);
+      unit.onChange = (changes) => {
+        // Notifier uniquement les clients qui sont dans la zone d'intérêt
+        // ou qui sont propriétaires de l'unité
+        this.clients.forEach(client => {
+          if (unit.owner === client.sessionId || this.isEntityInClientView(client.sessionId, 'unit', unitId)) {
+            this.broadcast("unitUpdate", {
+              id: unitId,
+              changes: changes.map(change => ({
+                field: change.field,
+                value: change.value
+              }))
+            }, { clients: [client] });
+          }
+        });
+      };
+    };
+    
+    this.state.buildings.onAdd = (building, buildingId) => {
+      console.log(`Bâtiment ajouté à l'état: ${buildingId}`);
+      building.onChange = (changes) => {
+        // Notifier uniquement les clients qui sont dans la zone d'intérêt
+        // ou qui sont propriétaires du bâtiment
+        this.clients.forEach(client => {
+          if (building.owner === client.sessionId || this.isEntityInClientView(client.sessionId, 'building', buildingId)) {
+            this.broadcast("buildingUpdate", {
+              id: buildingId,
+              changes: changes.map(change => ({
+                field: change.field,
+                value: change.value
+              }))
+            }, { clients: [client] });
+          }
+        });
+      };
+    };
+    
+    console.log("Filtrage des entités configuré avec succès.");
+  }
+  
+  // Vérifier si une entité est dans la vue d'un client
+  private isEntityInClientView(clientId: string, entityType: string, entityId: string): boolean {
+    // Récupérer les chunks visibles par le client
+    const visibleChunks = this.playerVisibleChunks.get(clientId) || new Set<string>();
+    
+    // Récupérer la position de l'entité
+    const entityPosition = this.entityPositions.get(entityId);
+    if (!entityPosition) return false;
+    
+    // Calculer le chunk de l'entité
+    const entityChunkX = Math.floor(entityPosition.x / (TILE_SIZE * CHUNK_SIZE));
+    const entityChunkY = Math.floor(entityPosition.y / (TILE_SIZE * CHUNK_SIZE));
+    const entityChunkKey = `${entityChunkX},${entityChunkY}`;
+    
+    // Vérifier si le chunk de l'entité est visible par le client
+    return visibleChunks.has(entityChunkKey);
   }
 } 

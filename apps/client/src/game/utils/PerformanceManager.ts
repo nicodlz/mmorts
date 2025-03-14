@@ -107,6 +107,17 @@ export class PerformanceManager {
     this._fpsAverage = this._fpsHistory.reduce((sum, value) => sum + value, 0) / this._fpsHistory.length;
     this._pingAverage = this._pingHistory.reduce((sum, value) => sum + value, 0) / this._pingHistory.length;
     
+    // Réaction d'urgence pour FPS très bas (moins de 15)
+    const now = Date.now();
+    if (fps < 15 && this._qualityLevel > QualityLevel.LOW && now - this._lastQualityChange > 1000) {
+      console.log(`FPS critique (${fps}) détecté! Passage immédiat en mode basse qualité.`);
+      this._qualityLevel = QualityLevel.LOW;
+      this.applyQualitySettings();
+      this._lastQualityChange = now;
+      this._parametersChanged = true;
+      return; // Ne pas exécuter l'ajustement normal
+    }
+    
     // Ajuster automatiquement la qualité si nécessaire
     this.adjustQualityIfNeeded();
   }
@@ -136,8 +147,8 @@ export class PerformanceManager {
         console.log(`Performance faible détectée: FPS = ${this._fpsAverage.toFixed(1)}, Ping = ${this._pingAverage.toFixed(0)}ms. Qualité réduite à ${QualityLevel[this._qualityLevel]}`);
       }
     } 
-    // Augmenter la qualité si les performances sont bonnes
-    else if (this._fpsAverage > this._fpsThresholdHigh && this._pingAverage < this._pingThresholdHigh) {
+    // Augmenter la qualité si les performances sont bonnes - exiger une marge plus grande pour ADSL
+    else if (this._fpsAverage > this._fpsThresholdHigh + 5 && this._pingAverage < this._pingThresholdHigh) {
       if (this._qualityLevel < QualityLevel.HIGH) {
         this._qualityLevel++;
         this.applyQualitySettings();
@@ -157,14 +168,14 @@ export class PerformanceManager {
     
     switch (this._qualityLevel) {
       case QualityLevel.LOW:
-        this._networkUpdateRate = 250;      // 4 fois par seconde
-        this._renderDistance = 1;           // Charger moins de chunks
-        this._renderOptimizationInterval = 200; // Optimisations plus fréquentes
-        this._cleanupInterval = 2000;       // Nettoyage plus fréquent
-        this._maxTilePoolSize = 200;        // Moins d'objets en cache
-        this._positionThreshold = 1.5;      // Moins de mises à jour de position
-        this._lerpFactor = 0.05;            // Interpolation plus lente
-        this._effectsQuality = 0.2;         // Réduire les effets visuels
+        this._networkUpdateRate = 300;      // 3 fois par seconde (réduit)
+        this._renderDistance = 1;           // Charger seulement les chunks adjacents
+        this._renderOptimizationInterval = 100; // Optimisations très fréquentes
+        this._cleanupInterval = 1000;       // Nettoyage très fréquent
+        this._maxTilePoolSize = 150;        // Réduire encore la taille du pool
+        this._positionThreshold = 2.0;      // Réduire les mises à jour réseau
+        this._lerpFactor = 0.04;            // Interpolation plus lente pour économiser CPU
+        this._effectsQuality = 0.1;         // Effets visuels minimaux
         break;
         
       case QualityLevel.MEDIUM:
