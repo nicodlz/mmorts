@@ -2394,10 +2394,15 @@ export class GameScene extends Phaser.Scene {
     // Obtenir le delta time depuis la dernière frame (en secondes)
     const delta = this.game.loop.delta / 1000;
     
-    // Mettre à jour la position avec la précision subpixel en utilisant delta time
-    // On multiplie playerSpeed par 60 pour maintenir une vitesse similaire quand le jeu tourne à 60 FPS
-    this.actualX += dx * this.playerSpeed * delta * 60;
-    this.actualY += dy * this.playerSpeed * delta * 60;
+    // CORRECTION: Utiliser un deltaTime normalisé à 60 FPS
+    // Fixer la vitesse de déplacement indépendamment du FPS
+    // La constante 1/60 = 0.01666... est le temps d'une frame à 60 FPS
+    const normalizedDelta = delta / (1/60);
+    
+    // Mettre à jour la position avec la précision subpixel
+    // La vitesse est maintenant correctement ajustée par rapport au taux de rafraîchissement idéal
+    this.actualX += dx * this.playerSpeed * normalizedDelta;
+    this.actualY += dy * this.playerSpeed * normalizedDelta;
     
     // Vérifier les collisions
     if (this.isCollisionAt(this.actualX, this.actualY)) {
