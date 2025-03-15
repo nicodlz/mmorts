@@ -1078,16 +1078,53 @@ export class GameScene extends Phaser.Scene {
     
     // Écouter les messages d'épuisement de ressources
     this.room.onMessage("resourceDepleted", (message) => {
-      console.log("Ressource épuisée:", message.resourceId);
+      const { resourceId } = message;
       
-      // Récupérer le sprite de la ressource
-      const resourceSprite = this.resourceSprites.get(message.resourceId);
+      // Trouver le sprite de la ressource
+      const resourceSprite = this.resourceSprites.get(resourceId);
       if (resourceSprite) {
-        // Marquer la ressource comme épuisée
-        resourceSprite.setData('amount', 0);
+        console.log(`Ressource ${resourceId} épuisée, suppression de l'affichage`);
         
-        // Appliquer un effet visuel pour montrer l'épuisement
-        this.depleteResource(resourceSprite, message.resourceId);
+        // Effet visuel plus simple pour la disparition
+        this.tweens.add({
+          targets: resourceSprite,
+          alpha: 0,
+          scale: 0.1,
+          duration: 800,
+          ease: 'Power2',
+          onComplete: () => {
+            // Supprimer le sprite à la fin de l'animation
+            resourceSprite.destroy();
+            this.resourceSprites.delete(resourceId);
+            this.visibleResources.delete(resourceId);
+          }
+        });
+        
+        // Créer quelques textes flottants pour simuler des débris
+        for (let i = 0; i < 5; i++) {
+          const offsetX = Phaser.Math.Between(-20, 20);
+          const offsetY = Phaser.Math.Between(-20, 20);
+          
+          const text = this.add.text(
+            resourceSprite.x + offsetX, 
+            resourceSprite.y + offsetY, 
+            '*', 
+            { 
+              fontSize: '16px', 
+              color: '#ffffff' 
+            }
+          );
+          
+          this.tweens.add({
+            targets: text,
+            y: text.y - Phaser.Math.Between(30, 60),
+            alpha: 0,
+            duration: Phaser.Math.Between(500, 1000),
+            onComplete: () => {
+              text.destroy();
+            }
+          });
+        }
       }
     });
     
@@ -1642,8 +1679,37 @@ export class GameScene extends Phaser.Scene {
     this.room.state.units.onChange = (unit, unitId) => {
       const unitData = this.unitSprites.get(unitId);
       if (unitData) {
+        // Mettre à jour la position cible
         unitData.targetX = unit.x;
         unitData.targetY = unit.y;
+        
+        // Gestion de l'animation de récolte
+        if (unit.isHarvesting !== undefined) {
+          // Ajout de l'animation de récolte si elle est activée
+          if (unit.isHarvesting && unit.type === "villager") {
+            // Animation de récolte (oscillation plus prononcée)
+            const unitRect = unitData.sprite.getAt(0) as Phaser.GameObjects.Rectangle;
+            if (unitRect) {
+              // Appliquer une teinte jaune pour indiquer la récolte
+              unitRect.setTint(0xffffaa);
+              
+              // Stocker l'état de récolte dans les données du sprite
+              unitData.sprite.setData('harvesting', true);
+              console.log(`Animation de récolte activée pour le villageois ${unitId}`);
+            }
+          } else {
+            // Désactiver l'animation de récolte
+            const unitRect = unitData.sprite.getAt(0) as Phaser.GameObjects.Rectangle;
+            if (unitRect && unitData.sprite.getData('harvesting')) {
+              // Restaurer la couleur normale
+              unitRect.clearTint();
+              
+              // Réinitialiser l'état de récolte
+              unitData.sprite.setData('harvesting', false);
+              console.log(`Animation de récolte désactivée pour le villageois ${unitId}`);
+            }
+          }
+        }
       }
     };
 
@@ -2105,6 +2171,91 @@ export class GameScene extends Phaser.Scene {
       // Ne loguer que les messages liés aux combats ou dégâts
       if (type.includes('attack') || type.includes('damage') || type.includes('hit') || type.includes('combat')) {
         console.log(`Message de combat reçu [${type}]:`, message);
+      }
+    });
+    
+    // Écouter les dépôts de ressources au centre-ville
+    this.room.onMessage("resourceDeposited", (data: any) => {
+      console.log("Ressources déposées:", data);
+      
+      // Vérifier si c'est notre joueur qui a reçu les ressources
+      if (data.playerId === this.room.sessionId) {
+        // Afficher directement l'effet à la position du villageois
+        if (data.villagerX && data.villagerY) {
+          console.log(`Affichage effet dépôt à position villageois: (${data.villagerX}, ${data.villagerY})`);
+          
+          // Montrer un premier effet à la position du villageois - simplement "+20" sans type
+          this.showNumericEffect(
+            `+${data.amount}`, 
+            data.villagerX, 
+            data.villagerY - 20, 
+            data.type,
+            0.5 // Taille deux fois plus petite
+          );
+          
+          // Essayer de trouver un centre-ville pour l'effet visuel supplémentaire
+          let closestTownCenter = null;
+          this.buildingSprites.forEach((buildingSprite) => {
+            if (buildingSprite.getData('type') === 'town_center' && 
+                buildingSprite.getData('owner') === this.room.sessionId) {
+              // Ajouter un effet visuel au centre-ville - pulsation
+              this.tweens.add({
+                targets: buildingSprite,
+                scaleX: 1.1,
+                scaleY: 1.1,
+                duration: 300,
+                yoyo: true,
+                ease: 'Sine.easeInOut',
+                onComplete: () => {
+                  buildingSprite.setScale(1);
+                }
+              });
+            }
+          });
+        }
+        
+        // Mettre à jour l'affichage des ressources
+        this.updateResourcesUI();
+      }
+    });
+
+    // Écouter les dépôts de ressources au centre-ville
+    this.room.onMessage("resourceHarvested", (data: any) => {
+      const { resourceId, amount, villagerX, villagerY } = data;
+      
+      // Trouver le sprite de la ressource
+      const resourceSprite = this.resourceSprites.get(resourceId);
+      if (resourceSprite) {
+        // Ajouter l'effet de tremblement
+        this.addShakeEffect(resourceSprite, 0.5); // Intensité réduite pour les villageois
+        
+        // Afficher l'effet numérique de récolte (avec +1 au lieu de -1)
+        this.showNumericEffect(
+          `+${amount}`,
+          villagerX,
+          villagerY,
+          resourceSprite.getData('type'),
+          0.5 // Taille deux fois plus petite
+        );
+
+        // Mettre à jour les données du sprite
+        const currentAmount = resourceSprite.getData('amount') - amount;
+        resourceSprite.setData('amount', currentAmount);
+        
+        // Assombrir progressivement la ressource en fonction de la quantité restante
+        const maxAmount = resourceSprite.getData('maxAmount');
+        if (maxAmount > 0) {
+          const ratio = Math.max(0.1, currentAmount / maxAmount);
+          resourceSprite.setScale(0.8 + (0.2 * ratio));
+          
+          // Assombrir la couleur en fonction de la quantité restante
+          const darkenFactor = 0.7 + (0.3 * ratio);
+          resourceSprite.setTint(Phaser.Display.Color.GetColor(
+            Math.floor(255 * darkenFactor),
+            Math.floor(255 * darkenFactor),
+            Math.floor(255 * darkenFactor)
+          ));
+        }
       }
     });
   }
@@ -3501,57 +3652,74 @@ export class GameScene extends Phaser.Scene {
   }
   
   // Afficher un effet numérique flottant
-  private showNumericEffect(text: string, x: number, y: number, type: string = '') {
-    // Ne plus dépendre du groupe numericEffects
-    console.log(`Création d'un effet numérique: ${text} à (${x}, ${y}) de type ${type}`);
-    
-    // Si la qualité est très basse, réduire ou désactiver les effets
-    if (PerformanceManager.effectsQuality < 0.3 && Math.random() > PerformanceManager.effectsQuality) {
-      return; // Ignorer certains effets aléatoirement en basse qualité
+  private showNumericEffect(text: string, x: number, y: number, type: string = '', scale: number = 1) {
+    // Vérifier si le groupe d'effets existe, sinon le créer
+    if (!this.numericEffects) {
+      this.numericEffects = this.add.group();
     }
     
-    // S'assurer que le pool est initialisé
-    if (!this.textEffectPool) return;
+    // Déterminer la couleur en fonction du type
+    let color = '#ffffff';
+    if (type) {
+      switch (type) {
+        case 'gold':
+          color = '#FFD700';
+          break;
+        case 'wood':
+          color = '#8B4513';
+          break;
+        case 'stone':
+          color = '#A9A9A9';
+          break;
+        case 'iron':
+          color = '#A19D94';
+          break;
+        case 'coal':
+          color = '#1A1A1A';
+          break;
+        case 'steel':
+          color = '#708090';
+          break;
+        default:
+          if (text.startsWith('-')) {
+            color = '#ff0000'; // Rouge pour les dégâts
+          } else if (text.startsWith('+')) {
+            color = '#00ff00'; // Vert pour les gains
+          }
+      }
+    }
     
-    const color = type === 'gold' ? '#FFD700' : 
-                  type === 'wood' ? '#8B4513' : 
-                  type === 'stone' ? '#808080' : 
-                  type === 'iron' ? '#C0C0C0' :
-                  type === 'coal' ? '#333333' :
-                  type === 'steel' ? '#71797E' :
-                  '#FFFFFF';
-                  
-    // Obtenir un effet du pool
-    const effect = this.textEffectPool.get();
-    this.activeTextEffects.add(effect);
-    
-    // Configurer l'effet
-    effect.setText(text);
-    effect.setPosition(x, y - 20);
-    effect.setStyle({ 
+    // Créer directement un nouvel effet textuel en contournant les problèmes de pool
+    const textEffect = this.add.text(x, y, text, { 
+      fontSize: `${16 * scale}px`, 
+      fontFamily: 'Arial', 
       color: color,
-      strokeThickness: PerformanceManager.effectsQuality > 0.5 ? 2 : 1 
+      stroke: '#000000',
+      strokeThickness: 3
     });
-    effect.setVisible(true);
-    effect.setAlpha(1);
-    effect.setScale(1);
-
-    // Adapter l'animation à la qualité
-    const duration = 1500 * PerformanceManager.effectsQuality; // Réduire la durée en basse qualité
+    textEffect.setOrigin(0.5);
+    
+    // S'assurer que le texte est visible et au premier plan
+    textEffect.setDepth(100);
+    textEffect.setVisible(true);
+    
+    // Animer le texte
     this.tweens.add({
-      targets: effect,
-      y: y - (30 + 20 * PerformanceManager.effectsQuality), // Monter moins haut en basse qualité
-      alpha: { from: 1, to: 0 },
-      scale: { from: 1, to: 1 + 0.5 * PerformanceManager.effectsQuality }, // Moins grossir en basse qualité
-      duration: duration,
+      targets: textEffect,
+      y: y - 30 * scale,
+      alpha: 0,
+      scale: scale * 1.2,
+      duration: 1500, // Durée plus longue pour mieux voir l'effet
       ease: 'Power2',
       onComplete: () => {
-        this.activeTextEffects.delete(effect);
-        this.textEffectPool?.release(effect);
+        textEffect.destroy();
       }
     });
     
-    return effect;
+    // Pour debug : afficher les coordonnées et les valeurs dans la console
+    console.log(`Affichage effet numérique "${text}" à (${x}, ${y}) avec échelle ${scale} et couleur ${color}`);
+    
+    return textEffect;
   }
   
   // Shake effect pour un sprite
@@ -3970,11 +4138,18 @@ export class GameScene extends Phaser.Scene {
           prevBuilding.setData('toggleButton', null);
         }
         
-        // Détruire le bouton d'épée s'il existe (caserne)
+        // Détruire le bouton épée s'il existe (caserne)
         if (prevBuilding.getData('swordButton')) {
           const prevSwordButton = prevBuilding.getData('swordButton');
           prevSwordButton.destroy();
           prevBuilding.setData('swordButton', null);
+        }
+        
+        // Détruire le bouton villageois s'il existe (production de villageois)
+        if (prevBuilding.getData('villagerButton')) {
+          const prevVillagerButton = prevBuilding.getData('villagerButton');
+          prevVillagerButton.destroy();
+          prevBuilding.setData('villagerButton', null);
         }
       }
     }
@@ -4089,6 +4264,43 @@ export class GameScene extends Phaser.Scene {
             // Stocker une référence au bouton
             sprite.setData('swordButton', swordButton);
           }
+
+          // Si c'est un centre-ville, ajouter un emoji villageois
+          if (building.type === BuildingType.TOWN_CENTER) {
+            // Créer le bouton avec l'emoji paysan
+            const villagerButton = this.add.text(
+              sprite.x + 24, // Position à droite du bâtiment
+              sprite.y - 24, // Même hauteur que le bouton de recyclage
+              "👨‍🌾",
+              { fontSize: '14px' }
+            );
+            villagerButton.setOrigin(0.5);
+            villagerButton.setDepth(50); // Augmenter la profondeur Z
+            
+            // Rendre le bouton interactif
+            villagerButton.setInteractive({ useHandCursor: true });
+            
+            villagerButton.on('pointerdown', () => {
+              console.log("Bouton de production de villageois cliqué");
+              
+              // Effet visuel temporaire pour indiquer la demande
+              this.tweens.add({
+                targets: villagerButton,
+                scale: 1.5,
+                duration: 200,
+                yoyo: true,
+                ease: 'Power2'
+              });
+              
+              // Envoyer un message au serveur pour créer un villageois
+              this.room.send("spawnVillager", {
+                buildingId: buildingId
+              });
+            });
+            
+            // Stocker une référence au bouton
+            sprite.setData('villagerButton', villagerButton);
+          }
         }
       }
     }
@@ -4155,18 +4367,34 @@ export class GameScene extends Phaser.Scene {
     const container = this.add.container(unit.x, unit.y);
     container.setDepth(10);
     
-    // Créer un carré plus petit que le joueur (75%)
-    const unitSize = 6 * 0.75; // 75% de la taille du joueur (qui est 6)
-    
-    // Créer le carré avec la couleur du propriétaire
+    // Créer la forme de l'unité selon son type
     const graphics = this.add.graphics();
-    graphics.fillStyle(color, 1);
-    graphics.fillRect(-unitSize/2, -unitSize/2, unitSize, unitSize);
     
-    // Contour plus foncé
-    const darkerColor = this.getDarkerColor(color);
-    graphics.lineStyle(1, darkerColor, 1);
-    graphics.strokeRect(-unitSize/2, -unitSize/2, unitSize, unitSize);
+    if (unit.type === "villager") {
+      // Villageois : cercle plus petit que le joueur (70%)
+      const unitSize = 6 * 0.7; // 70% de la taille du joueur
+      
+      // Remplir avec la couleur du propriétaire
+      graphics.fillStyle(color, 1);
+      graphics.fillCircle(0, 0, unitSize/2);
+      
+      // Contour plus foncé
+      const darkerColor = this.getDarkerColor(color);
+      graphics.lineStyle(1, darkerColor, 1);
+      graphics.strokeCircle(0, 0, unitSize/2);
+    } else {
+      // Guerrier (ou autre type) : carré
+      const unitSize = 6 * 0.75; // 75% de la taille du joueur
+    
+      // Remplir avec la couleur du propriétaire
+      graphics.fillStyle(color, 1);
+      graphics.fillRect(-unitSize/2, -unitSize/2, unitSize, unitSize);
+      
+      // Contour plus foncé
+      const darkerColor = this.getDarkerColor(color);
+      graphics.lineStyle(1, darkerColor, 1);
+      graphics.strokeRect(-unitSize/2, -unitSize/2, unitSize, unitSize);
+    }
     
     // Ajouter le graphique au container
     container.add(graphics);
@@ -4240,9 +4468,24 @@ export class GameScene extends Phaser.Scene {
           const unitRect = unitData.sprite.getAt(0) as Phaser.GameObjects.Rectangle;
           
           if (unitRect) {
-            // Réduire le seuil de distance pour que l'animation ne s'active que si l'unité bouge réellement
-            // Était 0.5 pixels, maintenant 0.2 pixels pour plus de stabilité
-            if (distToTarget > 0.2) {
+            // Vérifier si l'unité est en train de récolter
+            const isHarvesting = unitData.sprite.getData('harvesting');
+            
+            if (isHarvesting) {
+              // Animation de récolte (oscillation plus rapide et plus prononcée)
+              if (!unitData.walkingPhase) {
+                unitData.walkingPhase = 0;
+              }
+              
+              // Animation plus rapide pour la récolte
+              unitData.walkingPhase += delta * 0.015; // Plus rapide que la marche
+              
+              // Oscillation plus prononcée pour la récolte
+              const harvestAngle = Math.sin(unitData.walkingPhase) * 0.1; // Amplitude plus grande
+              unitRect.setRotation(harvestAngle);
+            }
+            // Sinon, animation de marche standard
+            else if (distToTarget > 0.2) {
               // Oscillation de la rotation pour simuler la marche
               if (!unitData.walkingPhase) {
                 unitData.walkingPhase = 0;

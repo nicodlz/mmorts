@@ -1,5 +1,6 @@
 import { Schema, type, MapSchema } from "@colyseus/schema";
 import { PLAYER_HEALTH, UNIT_HEALTH, BUILDING_HEALTH } from "shared";
+import { UnitState } from "shared";
 
 // Types de ressources
 export enum ResourceType {
@@ -77,6 +78,22 @@ export class UnitSchema extends Schema {
   @type("number") damage: number = 25; // Dégâts de base
   @type("number") lastAttackTime: number = 0; // Timestamp de la dernière attaque
   @type("string") attackTarget: string = ""; // ID de la cible actuelle
+  
+  // Propriétés pour l'IA des villageois
+  @type("string") state: string = UnitState.IDLE; // État actuel du villageois (idle, harvesting, returning)
+  @type("string") targetResourceId: string = ""; // ID de la ressource ciblée
+  @type("number") carryingAmount: number = 0; // Quantité de ressources transportée
+  @type("string") carryingType: string = ""; // Type de ressource transportée
+  @type("string") homeBaseId: string = ""; // ID du centre-ville de rattachement
+  @type("number") lastHarvestTime: number = 0; // Timestamp de la dernière récolte
+  @type("boolean") isHarvesting: boolean = false; // Indique si le villageois est en animation de récolte
+  
+  // Propriétés pour le système anti-blocage
+  @type("number") lastMoveTime: number = 0; // Timestamp du dernier mouvement enregistré
+  @type("number") lastX: number = 0; // Dernière position X connue
+  @type("number") lastY: number = 0; // Dernière position Y connue
+  @type("number") blockedTime: number = 0; // Temps passé bloqué à la même position
+  @type("number") stateStartTime: number = 0; // Temps de début de l'état actuel
 }
 
 // Schéma pour un bâtiment

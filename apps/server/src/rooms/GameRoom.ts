@@ -8,6 +8,7 @@ import {
   TILE_SIZE,
   CHUNK_SIZE,
   ResourceType,
+  UnitType,
   GameState as GameStateSchema
 } from "../schemas/GameState";
 
@@ -23,7 +24,8 @@ import {
   COMBAT,
   DEATH_SYSTEM,
   PLAYER_STARTING_RESOURCES,
-  HARVEST_AMOUNT
+  HARVEST_AMOUNT,
+  UnitState
 } from "shared";
 
 // Schéma principal du jeu
@@ -67,6 +69,10 @@ export class GameRoom extends Room<GameState> {
   private lastInterestUpdate: number = 0; // Timestamp de la dernière mise à jour des zones d'intérêt
   private entityPositions: Map<string, {type: string, x: number, y: number}> = new Map(); // Position de toutes les entités
   private entitiesByChunk: Map<string, {players: Set<string>, units: Set<string>, buildings: Set<string>}> = new Map(); // Entités par chunk
+
+  // Timestamp de la dernière mise à jour de l'IA des villageois
+  private lastVillagerAIUpdate: number = 0;
+  private lastVillagerStatLog: number = 0;
 
   onCreate(options: { worldData: { mapLines: string[], resources: Map<string, ResourceSchema>, resourcesByChunk: Map<string, Set<string>> } }) {
     // Initialiser l'état du jeu
@@ -273,6 +279,126 @@ export class GameRoom extends Room<GameState> {
       if (isTargetModeChanged) {
         console.log(`Mode cible de ${client.sessionId}: ${data.isTargetMode ? 'activé' : 'désactivé'} à (${data.x}, ${data.y})`);
       }
+    });
+    
+    // Gestionnaire pour la création de villageois
+    this.onMessage("spawnVillager", (client, data) => {
+      const { buildingId } = data;
+      
+      // Vérifier que le client est le propriétaire du bâtiment
+      const building = this.state.buildings.get(buildingId);
+      if (!building || building.owner !== client.sessionId) {
+        console.log(`Le client ${client.sessionId} n'est pas autorisé à créer des villageois dans le bâtiment ${buildingId}`);
+        return;
+      }
+      
+      // Vérifier que le bâtiment est un centre-ville
+      if (building.type !== BuildingType.TOWN_CENTER) {
+        console.log(`Le bâtiment ${buildingId} n'est pas un centre-ville`);
+        return;
+      }
+      
+      // Obtenir le joueur
+      const player = this.state.players.get(client.sessionId);
+      if (!player) return;
+      
+      // Vérifier que le joueur a assez de ressources
+      const goldCost = UNIT_COSTS.VILLAGER[ResourceType.GOLD];
+      
+      if ((player.resources.get(ResourceType.GOLD) || 0) < goldCost) {
+        console.log(`Le joueur ${client.sessionId} n'a pas assez d'or pour créer un villageois`);
+        // Notifier le client que la création a échoué
+        client.send("unitCreationFailed", {
+          reason: "Ressources insuffisantes",
+          required: { [ResourceType.GOLD]: goldCost }
+        });
+        return;
+      }
+      
+      // Vérifier la population
+      if (player.population >= player.maxPopulation) {
+        console.log(`Le joueur ${client.sessionId} a atteint sa limite de population`);
+        client.send("unitCreationFailed", {
+          reason: "Population maximale atteinte"
+        });
+        return;
+      }
+      
+      // Déduire les ressources
+      player.resources.set(ResourceType.GOLD, (player.resources.get(ResourceType.GOLD) || 0) - goldCost);
+      
+      // Créer le villageois
+      const unit = new UnitSchema();
+      unit.id = `villager_${client.sessionId}_${Date.now()}`;
+      unit.type = UnitType.VILLAGER;
+      unit.owner = client.sessionId;
+      
+      // Définir les propriétés du villageois
+      unit.state = UnitState.IDLE;
+      unit.homeBaseId = buildingId; // Associer le villageois à ce centre-ville
+      
+      // Positionner le villageois près du centre-ville en évitant les superpositions
+      const existingPositions: Array<{x: number, y: number}> = [];
+      
+      // Collecter les positions des unités existantes
+      this.state.units.forEach((existingUnit) => {
+        if (Math.abs(existingUnit.x - building.x) < TILE_SIZE * 3 && 
+            Math.abs(existingUnit.y - building.y) < TILE_SIZE * 3) {
+          existingPositions.push({x: existingUnit.x, y: existingUnit.y});
+        }
+      });
+      
+      // Positions possibles autour du centre-ville (8 directions)
+      const positions = [
+        { x: building.x + TILE_SIZE, y: building.y },              // droite
+        { x: building.x - TILE_SIZE, y: building.y },              // gauche
+        { x: building.x, y: building.y + TILE_SIZE },              // bas
+        { x: building.x, y: building.y - TILE_SIZE },              // haut
+        { x: building.x + TILE_SIZE, y: building.y + TILE_SIZE },  // bas-droite
+        { x: building.x - TILE_SIZE, y: building.y + TILE_SIZE },  // bas-gauche
+        { x: building.x + TILE_SIZE, y: building.y - TILE_SIZE },  // haut-droite
+        { x: building.x - TILE_SIZE, y: building.y - TILE_SIZE }   // haut-gauche
+      ];
+      
+      // Trouver une position libre
+      let position = positions[0];
+      
+      for (const pos of positions) {
+        // Vérifier si cette position est déjà occupée
+        const isOccupied = existingPositions.some(existingPos => 
+          Math.abs(existingPos.x - pos.x) < TILE_SIZE / 2 && 
+          Math.abs(existingPos.y - pos.y) < TILE_SIZE / 2
+        );
+        
+        if (!isOccupied) {
+          position = pos;
+          break;
+        }
+      }
+      
+      // Si toutes les positions sont occupées, ajouter un petit décalage aléatoire
+      if (position === positions[0] && existingPositions.length > 0) {
+        position.x += Math.random() * TILE_SIZE - TILE_SIZE / 2;
+        position.y += Math.random() * TILE_SIZE - TILE_SIZE / 2;
+      }
+      
+      unit.x = position.x;
+      unit.y = position.y;
+      
+      // Ajouter le villageois à l'état du jeu
+      this.state.units.set(unit.id, unit);
+      
+      // Augmenter la population du joueur
+      player.population += 1;
+      
+      console.log(`Villageois créé: ${unit.id} pour le joueur ${client.sessionId}`);
+      
+      // Notifier le client que la création a réussi
+      client.send("unitCreated", {
+        unitId: unit.id,
+        type: UnitType.VILLAGER,
+        position: { x: unit.x, y: unit.y }
+      });
     });
     
     // Gestionnaire pour le déplacement des unités vers une cible
@@ -520,6 +646,12 @@ export class GameRoom extends Room<GameState> {
     
     // Mettre à jour les positions des unités
     this.updateUnitPositions();
+    
+    // Mettre à jour l'IA des villageois (réduit à 4 fois par seconde)
+    if (!this.lastVillagerAIUpdate || now - this.lastVillagerAIUpdate > 250) {
+      this.updateVillagerAI();
+      this.lastVillagerAIUpdate = now;
+    }
     
     // Mettre à jour le système de combat
     this.updateCombat();
@@ -931,28 +1063,8 @@ export class GameRoom extends Room<GameState> {
     
     // Si la ressource est épuisée, planifier sa réapparition
     if (resource.amount <= 0) {
-      resource.isRespawning = true;
-      
-      // Planifier la réapparition
-      const respawnTime = RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000;
-      setTimeout(() => {
-        if (this.resources.has(resourceId)) {
-          resource.amount = RESOURCE_AMOUNTS[resource.type as ResourceType] || resource.maxAmount;
-          resource.isRespawning = false;
-          
-          // Broadcast la réapparition
-          this.broadcast("resourceRespawned", {
-            resourceId: resourceId,
-            amount: resource.amount
-          });
-        }
-      }, respawnTime);
-      
-      // Broadcast l'épuisement
-      this.broadcast("resourceDepleted", {
-        resourceId: resourceId,
-        respawnTime: respawnTime
-      });
+      // Utiliser la méthode centralisée pour gérer l'épuisement
+      this.handleResourceDepletion(resourceId);
     }
   }
 
@@ -1052,6 +1164,553 @@ export class GameRoom extends Room<GameState> {
   // Mise à jour de l'IA
   private updateAI() {
     // Mettre à jour l'IA ici
+  }
+
+  // Méthode pour mettre à jour l'IA des villageois
+  private updateVillagerAI() {
+    // Récupérer tous les villageois
+    const villagers = Array.from(this.state.units.values())
+      .filter(unit => unit.type === UnitType.VILLAGER);
+    
+    const now = Date.now();
+    const deltaTime = now - (this.lastVillagerAIUpdate || now);
+    
+    // Statistiques pour le diagnostic
+    let totalVillagers = villagers.length;
+    let idle = 0, harvesting = 0, returning = 0, errors = 0;
+    
+    // Pour chaque villageois
+    for (const villager of villagers) {
+      try {
+        // Trouver le propriétaire du villageois
+        const ownerId = villager.owner;
+        const owner = this.state.players.get(ownerId);
+        if (!owner) {
+          errors++;
+          continue;
+        }
+        
+        // Si le villageois n'a pas de centre-ville associé, trouver le plus proche
+        if (!villager.homeBaseId) {
+          const townCenters = Array.from(this.state.buildings.values())
+            .filter(building => building.type === BuildingType.TOWN_CENTER && building.owner === ownerId);
+          
+          if (townCenters.length > 0) {
+            // Trouver le centre-ville le plus proche
+            let closestTC = townCenters[0];
+            let closestDistance = this.getDistance(villager.x, villager.y, closestTC.x, closestTC.y);
+            
+            for (const tc of townCenters) {
+              const distance = this.getDistance(villager.x, villager.y, tc.x, tc.y);
+              if (distance < closestDistance) {
+                closestTC = tc;
+                closestDistance = distance;
+              }
+            }
+            
+            villager.homeBaseId = closestTC.id;
+          } else {
+            // Pas de centre-ville, rester inactif
+            villager.state = UnitState.IDLE;
+            idle++;
+            continue;
+          }
+        }
+        
+        // Comportement selon l'état
+        switch (villager.state) {
+          case UnitState.IDLE:
+            // Incrémenter le compteur pour stats
+            idle++;
+            // Chercher une ressource à collecter
+            this.findResourceToCollect(villager);
+            break;
+            
+          case UnitState.HARVESTING:
+            // Incrémenter le compteur pour stats
+            harvesting++;
+            
+            // Si le villageois a une cible
+            if (villager.targetResourceId) {
+              const resource = this.resources.get(villager.targetResourceId);
+              
+              // Si la ressource existe et a toujours des ressources
+              if (resource && resource.amount > 0) {
+                // Calculer la distance à la ressource
+                const distance = this.getDistance(villager.x, villager.y, resource.x, resource.y);
+                
+                // Vérifier si le villageois est en état de récolte depuis trop longtemps
+                const harvestingTime = now - (villager.stateStartTime || now);
+                if (!villager.stateStartTime) {
+                  villager.stateStartTime = now;
+                } else if (harvestingTime > 60000) { // 60 secondes max en HARVESTING
+                  console.log(`Villageois ${villager.id} en HARVESTING depuis plus de 60s - passage forcé en RETURNING`);
+                  villager.state = UnitState.RETURNING;
+                  villager.stateStartTime = now;
+                  break;
+                }
+                
+                // Log la distance pour debug (limité à 1% des cas pour éviter trop de logs)
+                if (Math.random() < 0.01) {
+                  console.log(`Villageois ${villager.id} distance à la ressource: ${distance.toFixed(2)}, TILE_SIZE * 1 = ${(TILE_SIZE * 1).toFixed(2)}`);
+                }
+                
+                // Si assez proche, collecter (distance beaucoup plus petite)
+                if (distance < TILE_SIZE * 1) { // Augmenté de 0.3 à 1 pour permettre une récolte à plus grande distance
+                  // Vérifier le temps écoulé depuis la dernière collecte
+                  const timeSinceLastHarvest = now - (villager.lastHarvestTime || 0);
+                  const harvestRate = 1000; // 1 seconde entre chaque collecte
+                  
+                  // Debug log
+                  if (Math.random() < 0.05) { // Limiter le volume de logs (5% de chance)
+                    console.log(`Villageois ${villager.id} récoltant ${resource.type}, distance=${distance}, sac: ${villager.carryingAmount}/20`);
+                  }
+                  
+                  if (timeSinceLastHarvest > harvestRate) {
+                    // Collecter une unité de ressource (limité par le montant disponible)
+                    const collectAmount = Math.min(resource.amount, 1);
+                    
+                    // Debug log pour la récolte
+                    console.log(`Villageois ${villager.id} récolte ${collectAmount} de ${resource.type}, sac: ${villager.carryingAmount}/20`);
+                    
+                    // Seulement si on peut réellement collecter quelque chose
+                    if (collectAmount > 0) {
+                      // Réduire effectivement le montant de la ressource
+                      resource.amount -= collectAmount;
+                      
+                      // Activer l'animation de récolte
+                      villager.isHarvesting = true;
+                      
+                      // Notifier les clients de la récolte pour l'animation
+                      this.broadcast("resourceHarvested", {
+                        resourceId: resource.id,
+                        amount: collectAmount,
+                        villagerX: villager.x,
+                        villagerY: villager.y
+                      });
+                      
+                      // Si la ressource est épuisée, notifier tous les clients
+                      if (resource.amount <= 0) {
+                        // Marquer la ressource comme épuisée pour le système
+                        this.handleResourceDepletion(resource.id);
+                        
+                        console.log(`Ressource ${resource.id} épuisée par villageois ${villager.id}`);
+                      }
+                      
+                      // Si c'est la première collecte, définir le type de ressource transportée
+                      if (villager.carryingAmount === 0) {
+                        villager.carryingType = resource.type;
+                      }
+                      
+                      // Ajouter à la quantité transportée
+                      villager.carryingAmount += collectAmount;
+                      villager.lastHarvestTime = now;
+                      
+                      // Si le sac est plein (capacité de 20) ou ressource épuisée, retourner au centre-ville
+                      if (villager.carryingAmount >= 20 || resource.amount <= 0) {
+                        villager.state = UnitState.RETURNING;
+                        console.log(`Villageois ${villager.id} passe en mode RETURNING avec ${villager.carryingAmount} ressources de ${villager.carryingType}`);
+                      }
+                    } else {
+                      // Si la ressource est épuisée, chercher une autre
+                      villager.targetResourceId = "";
+                      this.findResourceToCollect(villager);
+                    }
+                  }
+                } else {
+                  // Se déplacer vers la ressource avec delta time
+                  this.moveVillagerTo(villager, resource.x, resource.y);
+                }
+              } else {
+                // Si la ressource n'existe plus ou est épuisée, chercher une autre
+                villager.targetResourceId = "";
+                this.findResourceToCollect(villager);
+              }
+            } else {
+              // Si pas de cible, chercher une ressource
+              this.findResourceToCollect(villager);
+            }
+            break;
+            
+          case UnitState.RETURNING:
+            // Incrémenter le compteur pour stats
+            returning++;
+            
+            // Désactiver l'animation de récolte lorsqu'on retourne au centre
+            if (villager.isHarvesting) {
+              villager.isHarvesting = false;
+              console.log(`Villageois ${villager.id} arrête de récolter pour retourner au centre-ville`);
+            }
+            
+            // Trouver le centre-ville associé
+            const homeBase = this.state.buildings.get(villager.homeBaseId);
+            
+            // Si le centre-ville n'existe plus, retourner à l'état IDLE
+            if (!homeBase) {
+              console.log(`Centre-ville ${villager.homeBaseId} introuvable pour le villageois ${villager.id}, retour à IDLE`);
+              villager.state = UnitState.IDLE;
+              villager.homeBaseId = "";
+              break;
+            }
+            
+            // Vérifier le temps passé en état RETURNING pour éviter les blocages
+            const returningTime = now - (villager.stateStartTime || now);
+            if (!villager.stateStartTime) {
+              villager.stateStartTime = now;
+            } else if (returningTime > 60000) { // 60 secondes max en RETURNING
+              console.log(`Villageois ${villager.id} en RETURNING depuis plus de 60s - passage forcé en IDLE`);
+              villager.state = UnitState.IDLE;
+              villager.stateStartTime = now;
+              
+              // Déposer les ressources directement dans l'inventaire du joueur pour éviter de les perdre
+              if (villager.carryingAmount > 0 && villager.carryingType) {
+                // Récupérer le type de ressource transportée
+                const resourceType = villager.carryingType;
+                
+                // Ajouter aux ressources du joueur
+                const currentAmount = owner.resources.get(resourceType) || 0;
+                
+                // Stocker la quantité déposée avant de la réinitialiser
+                const depositedAmount = villager.carryingAmount;
+                
+                // Mettre à jour les ressources du joueur
+                owner.resources.set(resourceType, currentAmount + depositedAmount);
+                
+                // Log détaillé du dépôt
+                console.log(`Villageois ${villager.id} dépose ${depositedAmount} ${resourceType} au centre-ville. Nouveau total: ${currentAmount + depositedAmount}`);
+                
+                // Réinitialiser le transport
+                villager.carryingAmount = 0;
+                villager.carryingType = "";
+                
+                // Envoyer un message de confirmation du dépôt au client
+                this.broadcast("resourceDeposited", {
+                  playerId: owner.id,
+                  type: resourceType,
+                  amount: depositedAmount,
+                  villagerX: villager.x,
+                  villagerY: villager.y,
+                  totalAmount: currentAmount + depositedAmount
+                });
+
+                // Log détaillé pour vérifier l'envoi de l'événement resourceDeposited
+                console.log(`EVENT resourceDeposited envoyé: player=${owner.id}, type=${resourceType}, amount=${depositedAmount}, total=${currentAmount + depositedAmount}`);
+              }
+              
+              break;
+            }
+            
+            // Calculer la distance au centre-ville
+            const distanceToBase = this.getDistance(villager.x, villager.y, homeBase.x, homeBase.y);
+            
+            // Debug log pour la distance (limité à 1% des cas)
+            if (Math.random() < 0.01) {
+              console.log(`Villageois ${villager.id} distance au centre-ville: ${distanceToBase.toFixed(2)}, TILE_SIZE * 1.5 = ${(TILE_SIZE * 1.5).toFixed(2)}`);
+            }
+            
+            // Si suffisamment proche du centre-ville, déposer les ressources
+            if (distanceToBase < TILE_SIZE * 1.5) {
+              if (villager.carryingAmount > 0 && villager.carryingType) {
+                // Récupérer le type de ressource transportée
+                const resourceType = villager.carryingType;
+                
+                // Ajouter aux ressources du joueur
+                const currentAmount = owner.resources.get(resourceType) || 0;
+                
+                // Stocker la quantité déposée avant de la réinitialiser
+                const depositedAmount = villager.carryingAmount;
+                
+                // Mettre à jour les ressources du joueur
+                owner.resources.set(resourceType, currentAmount + depositedAmount);
+                
+                // Log détaillé du dépôt
+                console.log(`Villageois ${villager.id} dépose ${depositedAmount} ${resourceType} au centre-ville. Nouveau total: ${currentAmount + depositedAmount}`);
+                
+                // Réinitialiser le transport
+                villager.carryingAmount = 0;
+                villager.carryingType = "";
+                
+                // Envoyer un message de confirmation du dépôt au client
+                this.broadcast("resourceDeposited", {
+                  playerId: owner.id,
+                  type: resourceType,
+                  amount: depositedAmount,
+                  villagerX: villager.x,
+                  villagerY: villager.y,
+                  totalAmount: currentAmount + depositedAmount
+                });
+
+                // Log détaillé pour vérifier l'envoi de l'événement resourceDeposited
+                console.log(`EVENT resourceDeposited envoyé: player=${owner.id}, type=${resourceType}, amount=${depositedAmount}, total=${currentAmount + depositedAmount}`);
+              }
+              
+              // Retourner à l'état IDLE pour chercher d'autres ressources
+              villager.state = UnitState.IDLE;
+              villager.blockedTime = 0; // Réinitialiser le compteur de blocage
+              villager.stateStartTime = now;
+              console.log(`Villageois ${villager.id} a déposé ses ressources, retour à IDLE`);
+            } else {
+              // Continuer à se déplacer vers le centre-ville
+              this.moveVillagerTo(villager, homeBase.x, homeBase.y);
+            }
+            break;
+            
+          default:
+            // État inconnu, réinitialiser
+            villager.state = UnitState.IDLE;
+            this.findResourceToCollect(villager);
+            errors++;
+        }
+      } catch (error) {
+        console.error(`Erreur lors de la mise à jour du villageois ${villager.id}:`, error);
+        // Réinitialiser l'état du villageois en cas d'erreur
+        villager.state = UnitState.IDLE;
+        errors++;
+      }
+    }
+    
+    // Log de résumé des villageois toutes les 5 secondes
+    if (!this.lastVillagerStatLog || now - this.lastVillagerStatLog > 5000) {
+      if (totalVillagers > 0) {
+        console.log(`[Villagers] Total: ${totalVillagers} | Idle: ${idle} | Harvesting: ${harvesting} | Returning: ${returning} | Errors: ${errors}`);
+      }
+      this.lastVillagerStatLog = now;
+    }
+    
+    // Mettre à jour le timestamp de la dernière update
+    this.lastVillagerAIUpdate = now;
+  }
+
+  // Méthode pour trouver une ressource à collecter
+  private findResourceToCollect(villager: UnitSchema) {
+    // Types de ressources que les villageois peuvent collecter
+    const collectableTypes = [ResourceType.GOLD, ResourceType.WOOD, ResourceType.STONE];
+    
+    // Augmenter le rayon de recherche pour trouver des ressources plus éloignées
+    const searchRadius = 20;
+    
+    // Obtenir toutes les ressources dans le rayon de recherche
+    const nearbyResources = this.getResourcesInRange(villager.x, villager.y, searchRadius);
+    
+    // Initialiser la ressource la plus proche à null et la distance minimale à l'infini
+    let closestResource = null;
+    let minDistance = Infinity;
+    
+    // Parcourir toutes les ressources proches
+    for (const resourceId of nearbyResources) {
+      const resource = this.resources.get(resourceId);
+      
+      // Vérifier si la ressource existe, a encore des ressources et est d'un type collectable
+      if (resource && 
+          resource.amount > 0 && 
+          collectableTypes.includes(resource.type as ResourceType)) {
+        
+        // Calculer la distance à cette ressource
+        const distance = this.getDistance(villager.x, villager.y, resource.x, resource.y);
+        
+        // Si c'est plus proche que la ressource actuelle la plus proche, mettre à jour
+        if (distance < minDistance) {
+          minDistance = distance;
+          closestResource = resource;
+        }
+      }
+    }
+    
+    // Si une ressource a été trouvée, la cibler
+    if (closestResource) {
+      villager.targetResourceId = closestResource.id;
+      villager.state = UnitState.HARVESTING;
+      
+      // Déplacer immédiatement le villageois vers la ressource
+      this.moveVillagerTo(villager, closestResource.x, closestResource.y);
+    } else {
+      // Si on n'a rien trouvé, rester en IDLE
+      villager.state = UnitState.IDLE;
+      
+      // Si on a vraiment rien trouvé, essayer avec un rayon encore plus grand
+      if (nearbyResources.size === 0 && Math.random() < 0.1) {
+        const extraSearchRadius = 40;
+        const farResources = this.getResourcesInRange(villager.x, villager.y, extraSearchRadius);
+        
+        if (farResources.size > 0) {
+          // Prendre une ressource aléatoire dans ce lot plus éloigné
+          const farResourceIds = Array.from(farResources);
+          const randomResourceId = farResourceIds[Math.floor(Math.random() * farResourceIds.length)];
+          const randomResource = this.resources.get(randomResourceId);
+          
+          if (randomResource && randomResource.amount > 0 && 
+              collectableTypes.includes(randomResource.type as ResourceType)) {
+            villager.targetResourceId = randomResource.id;
+            villager.state = UnitState.HARVESTING;
+            this.moveVillagerTo(villager, randomResource.x, randomResource.y);
+          }
+        }
+      }
+    }
+  }
+
+  // Méthode pour déplacer un villageois vers une position
+  private moveVillagerTo(villager: UnitSchema, targetX: number, targetY: number) {
+    // Vitesse de base en unités par seconde
+    const BASE_VILLAGER_SPEED = 70; // Augmentation de la vitesse de base pour un meilleur mouvement
+    const MAX_BLOCKED_TIME = 3000; // ms
+    
+    // Utiliser le temps écoulé depuis la dernière mise à jour pour normaliser la vitesse
+    const now = Date.now();
+    const deltaTime = now - (villager.lastMoveTime || now);
+    const deltaSeconds = deltaTime / 1000; // Convertir en secondes
+    
+    // Vitesse ajustée selon le delta time
+    const speedThisFrame = BASE_VILLAGER_SPEED * deltaSeconds;
+    
+    // Initialiser les données de position si nécessaire
+    if (!villager.lastMoveTime) {
+      villager.lastMoveTime = now;
+      villager.lastX = villager.x;
+      villager.lastY = villager.y;
+    } else if (deltaTime > 50) { // Vérifier si plus de 50ms ont passé
+      // Calculer la distance parcourue depuis la dernière vérification
+      const distanceMoved = this.getDistance(villager.x, villager.y, villager.lastX, villager.lastY);
+      
+      // Si le villageois ne s'est presque pas déplacé, incrémenter son compteur de blocage
+      if (distanceMoved < speedThisFrame * 0.5 && deltaTime > 500) {
+        villager.blockedTime = (villager.blockedTime || 0) + deltaTime;
+        
+        // Si le villageois est bloqué trop longtemps, débloquer avec plus de force
+        if ((villager.blockedTime || 0) > MAX_BLOCKED_TIME) {
+          // S'assurer que nous revenons à IDLE si nous sommes bloqués trop longtemps pendant la récolte
+          if (villager.state === UnitState.HARVESTING && !this.resources.has(villager.targetResourceId)) {
+            villager.state = UnitState.IDLE;
+            villager.targetResourceId = "";
+            villager.blockedTime = 0;
+            return;
+          }
+          
+          // S'assurer que nous revenons à IDLE si nous sommes bloqués trop longtemps en retournant au centre-ville
+          if (villager.state === UnitState.RETURNING && !this.state.buildings.has(villager.homeBaseId)) {
+            console.log(`Villageois ${villager.id} bloqué en RETURNING - centre-ville disparu, retour à IDLE, sac: ${villager.carryingAmount}/${villager.carryingType}`);
+            villager.state = UnitState.IDLE;
+            villager.homeBaseId = "";
+            villager.blockedTime = 0;
+            return;
+          }
+          
+          // Calculer une direction aléatoire pour débloquer
+          const randomAngle = Math.random() * Math.PI * 2;
+          const randomDistance = TILE_SIZE * 2; // Distance réduite pour un déblocage plus contrôlé
+          const randomDx = Math.cos(randomAngle) * randomDistance;
+          const randomDy = Math.sin(randomAngle) * randomDistance;
+          
+          // Essayer de se déplacer dans cette direction
+          const newX = villager.x + randomDx;
+          const newY = villager.y + randomDy;
+          
+          if (this.isValidPosition(newX, newY)) {
+            villager.x = newX;
+            villager.y = newY;
+            villager.blockedTime = 0; // Réinitialiser le compteur
+            
+            // Mettre à jour les dernières positions connues
+            villager.lastMoveTime = now;
+            villager.lastX = villager.x;
+            villager.lastY = villager.y;
+            
+            // Log pour diagnostic
+            console.log(`Villageois ${villager.id} débloqué avec un mouvement aléatoire`);
+            return;
+          }
+        }
+      } else {
+        // Réinitialiser le compteur s'il se déplace normalement
+        villager.blockedTime = 0;
+      }
+      
+      // Mettre à jour les dernières positions connues
+      villager.lastMoveTime = now;
+      villager.lastX = villager.x;
+      villager.lastY = villager.y;
+    }
+    
+    // Calculer le vecteur de direction
+    const dx = targetX - villager.x;
+    const dy = targetY - villager.y;
+    
+    // Calculer la distance à la cible
+    const length = Math.sqrt(dx * dx + dy * dy);
+    
+    // Si la distance est très petite, considérer qu'on est arrivé
+    if (length < 0.1) { // Réduit de 0.5 à 0.1 pour permettre de s'approcher au maximum
+      return; // Déjà à destination, ne pas bouger davantage
+    }
+    
+    // Normaliser le vecteur pour avoir une vitesse constante
+    const normalizedDx = dx / length;
+    const normalizedDy = dy / length;
+    
+    // Calculer la nouvelle position en fonction du delta time
+    const moveDistance = Math.min(speedThisFrame, length); // Ne pas dépasser la cible
+    const newX = villager.x + normalizedDx * moveDistance;
+    const newY = villager.y + normalizedDy * moveDistance;
+    
+    // Vérifier si nous sommes très proches de la ressource cible
+    let forceMove = false;
+    if (villager.state === UnitState.HARVESTING && villager.targetResourceId) {
+      const targetResource = this.resources.get(villager.targetResourceId);
+      if (targetResource) {
+        const distanceToResource = this.getDistance(villager.x, villager.y, targetResource.x, targetResource.y);
+        // Si nous sommes suffisamment proches, forcer le mouvement
+        if (distanceToResource < TILE_SIZE * 1.2) { // Augmenté à 1.2 pour être cohérent avec la distance de récolte
+          forceMove = true;
+          console.log(`Villageois ${villager.id} force le mouvement vers la ressource, distance=${distanceToResource.toFixed(2)}`);
+        }
+      }
+    }
+    
+    // Vérifier les collisions et mettre à jour la position (ignorer les collisions si on force le mouvement)
+    if (forceMove || this.isValidPosition(newX, newY)) {
+      villager.x = newX;
+      villager.y = newY;
+    } else {
+      // Si collision, essayer des directions alternatives
+      const directions = [
+        { x: newX, y: villager.y }, // Horizontal
+        { x: villager.x, y: newY }, // Vertical
+        { x: villager.x + normalizedDx * moveDistance * 0.7, y: villager.y + normalizedDy * moveDistance * 0.3 }, // Diagonal 1
+        { x: villager.x + normalizedDx * moveDistance * 0.3, y: villager.y + normalizedDy * moveDistance * 0.7 }  // Diagonal 2
+      ];
+      
+      // Essayer chaque direction alternative
+      let moved = false;
+      for (const dir of directions) {
+        if (this.isValidPosition(dir.x, dir.y)) {
+          villager.x = dir.x;
+          villager.y = dir.y;
+          moved = true;
+          break;
+        }
+      }
+      
+      // Si aucune direction n'a fonctionné, marquer comme bloqué
+      if (!moved) {
+        villager.blockedTime = (villager.blockedTime || 0) + deltaTime;
+      }
+    }
+    
+    // Mettre à jour la rotation pour faire face à la direction du mouvement
+    villager.rotation = Math.atan2(dy, dx);
+    
+    // Désactiver l'animation de récolte pendant le déplacement
+    if (villager.isHarvesting) {
+        villager.isHarvesting = false;
+        console.log(`Villageois ${villager.id} arrête de récolter pour se déplacer`);
+    }
+  }
+
+  // Méthode utilitaire pour calculer la distance entre deux points
+  private getDistance(x1: number, y1: number, x2: number, y2: number): number {
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    return Math.sqrt(dx * dx + dy * dy);
   }
 
   // Méthode pour gérer la destruction d'un bâtiment
@@ -1570,25 +2229,25 @@ export class GameRoom extends Room<GameState> {
       const resource = this.resources.get(resourceId);
       if (resource && resource.amount > 0) {  // Ignorer les ressources avec une quantité de 0
         // Déterminer un rayon de collision basé sur le type de ressource
-        let collisionRadius = TILE_SIZE * 0.8; // Rayon de base augmenté
+        let collisionRadius = TILE_SIZE * 0.4; // Rayon de base réduit de 0.8 à 0.4
         
         // Ajuster le rayon selon le type de ressource
         switch (resource.type) {
           case ResourceType.WOOD:
-            // Les arbres ont un rayon plus grand
-            collisionRadius = TILE_SIZE * 1.2;
+            // Les arbres ont un rayon plus grand mais réduit
+            collisionRadius = TILE_SIZE * 0.6; // Réduit de 1.2 à 0.6
             break;
           case ResourceType.STONE:
-            // Les pierres ont un rayon moyen
-            collisionRadius = TILE_SIZE * 1.0;
+            // Les pierres ont un rayon moyen mais réduit
+            collisionRadius = TILE_SIZE * 0.5; // Réduit de 1.0 à 0.5
             break;
           case ResourceType.GOLD:
-            // L'or a un rayon standard
-            collisionRadius = TILE_SIZE * 0.9;
+            // L'or a un rayon standard mais réduit
+            collisionRadius = TILE_SIZE * 0.45; // Réduit de 0.9 à 0.45
             break;
           default:
-            // Autres ressources, rayon standard
-            collisionRadius = TILE_SIZE * 0.8;
+            // Autres ressources, rayon standard réduit
+            collisionRadius = TILE_SIZE * 0.4; // Réduit de 0.8 à 0.4
         }
         
         // Calcul de distance entre la position et le centre de la ressource
@@ -2089,7 +2748,8 @@ export class GameRoom extends Room<GameState> {
       if (chunkResources) {
         chunkResources.forEach(resourceId => {
           const resource = this.resources.get(resourceId);
-          if (resource) {
+          // Ne pas inclure les ressources épuisées (amount <= 0) ou en cours de respawn
+          if (resource && resource.amount > 0 && !resource.isRespawning) {
             resources.push({
               id: resource.id,
               type: resource.type,
@@ -2250,5 +2910,79 @@ export class GameRoom extends Room<GameState> {
     
     // Vérifier si le chunk de l'entité est visible par le client
     return visibleChunks.has(entityChunkKey);
+  }
+
+  // Méthode pour obtenir toutes les ressources dans un rayon donné
+  private getResourcesInRange(x: number, y: number, radius: number): Set<string> {
+    const resourcesInRange = new Set<string>();
+    
+    // Calculer les limites de la zone de recherche en termes de chunks
+    const tileRadius = radius * TILE_SIZE;
+    const minChunkX = Math.floor((x - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    const maxChunkX = Math.floor((x + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    const minChunkY = Math.floor((y - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    const maxChunkY = Math.floor((y + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    
+    // Parcourir tous les chunks dans la zone
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+      for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY++) {
+        const chunkKey = `${chunkX},${chunkY}`;
+        
+        // Si ce chunk contient des ressources, les ajouter à notre ensemble
+        if (this.resourcesByChunk.has(chunkKey)) {
+          const chunkResources = this.resourcesByChunk.get(chunkKey);
+          
+          if (chunkResources) {
+            // Pour chaque ressource dans ce chunk, vérifier si elle est dans le rayon
+            for (const resourceId of chunkResources) {
+              const resource = this.resources.get(resourceId);
+              
+              if (resource) {
+                const distance = this.getDistance(x, y, resource.x, resource.y);
+                
+                // Si la ressource est dans le rayon, l'ajouter à notre ensemble
+                if (distance <= tileRadius) {
+                  resourcesInRange.add(resourceId);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    return resourcesInRange;
+  }
+
+  // Nouvelle méthode pour gérer l'épuisement des ressources de manière centralisée
+  private handleResourceDepletion(resourceId: string) {
+    const resource = this.resources.get(resourceId);
+    if (!resource) return;
+    
+    // Marquer comme épuisée
+    resource.amount = 0;
+    resource.isRespawning = true;
+    
+    // Informer tous les clients
+    this.broadcast("resourceDepleted", {
+      resourceId: resourceId,
+      respawnTime: RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000
+    });
+    
+    // Planifier la réapparition
+    setTimeout(() => {
+      if (this.resources.has(resourceId)) {
+        resource.amount = RESOURCE_AMOUNTS[resource.type as ResourceType] || resource.maxAmount;
+        resource.isRespawning = false;
+        
+        // Informer tous les clients de la réapparition
+        this.broadcast("resourceRespawned", {
+          resourceId: resourceId,
+          amount: resource.amount
+        });
+        
+        console.log(`Ressource ${resourceId} réapparue avec ${resource.amount} unités`);
+      }
+    }, RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000);
   }
 } 

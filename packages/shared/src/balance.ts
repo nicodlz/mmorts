@@ -129,6 +129,9 @@ export const UNIT_COSTS = {
     [ResourceType.GOLD]: 2,
     [ResourceType.IRON]: 2,
   },
+  VILLAGER: {
+    [ResourceType.GOLD]: 10,
+  },
 };
 
 // Vitesse des unités
