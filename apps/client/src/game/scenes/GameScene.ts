@@ -561,7 +561,15 @@ export class GameScene extends Phaser.Scene {
     // Écouter la touche Escape pour annuler la construction
     this.input.keyboard?.on('keydown-ESC', () => {
       if (this.isPlacingBuilding) {
-        this.stopPlacingBuilding();
+        this.cancelPlacingBuilding();
+      }
+    });
+    
+    // Écouter l'événement stopPlacingBuilding (émis lorsque le menu est fermé)
+    this.events.on('stopPlacingBuilding', () => {
+      if (this.isPlacingBuilding) {
+        // Utiliser cancelPlacingBuilding pour arrêter complètement le mode placement quand le menu est fermé
+        this.cancelPlacingBuilding();
       }
     });
     
@@ -3977,6 +3985,23 @@ export class GameScene extends Phaser.Scene {
   }
 
   private stopPlacingBuilding() {
+    this.isPlacingBuilding = false;
+    // Ne pas réinitialiser le type de bâtiment sélectionné pour permettre le placement en chaîne
+    // this.selectedBuildingType = null;
+    
+    if (this.buildingPreview) {
+      this.buildingPreview.destroy();
+      this.buildingPreview = null;
+    }
+    
+    // Relancer immédiatement le mode placement avec le même type de bâtiment
+    if (this.selectedBuildingType) {
+      this.startPlacingBuilding(this.selectedBuildingType);
+    }
+  }
+
+  // Nouvelle méthode pour annuler complètement le mode de placement
+  private cancelPlacingBuilding() {
     this.isPlacingBuilding = false;
     this.selectedBuildingType = null;
     

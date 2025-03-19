@@ -26,7 +26,8 @@ import {
   PLAYER_STARTING_RESOURCES,
   HARVEST_AMOUNT,
   UnitState,
-  UnitType // Importé uniquement depuis shared
+  UnitType, // Importé uniquement depuis shared
+  BUILDING_HEALTH
 } from "shared";
 
 // Interfaces pour les données envoyées au client
@@ -1361,6 +1362,41 @@ export class GameRoom extends Room<GameStateSchema> {
     // Définir la propriété fullTileCollision à true pour les murs
     if (type === BuildingType.PLAYER_WALL) {
       building.fullTileCollision = true;
+    }
+    
+    // Définir la santé en fonction du type de bâtiment de manière plus sûre
+    switch (type) {
+      case BuildingType.TOWN_CENTER:
+        building.health = BUILDING_HEALTH.TOWN_CENTER;
+        building.maxHealth = BUILDING_HEALTH.TOWN_CENTER;
+        break;
+      case BuildingType.BARRACKS:
+        building.health = BUILDING_HEALTH.BARRACKS;
+        building.maxHealth = BUILDING_HEALTH.BARRACKS;
+        break;
+      case BuildingType.HOUSE:
+        building.health = BUILDING_HEALTH.HOUSE;
+        building.maxHealth = BUILDING_HEALTH.HOUSE;
+        break;
+      case BuildingType.PLAYER_WALL:
+        building.health = BUILDING_HEALTH.WALL;
+        building.maxHealth = BUILDING_HEALTH.WALL;
+        break;
+      case BuildingType.FURNACE:
+        building.health = BUILDING_HEALTH.FURNACE;
+        building.maxHealth = BUILDING_HEALTH.FURNACE;
+        break;
+      case BuildingType.FORGE:
+        building.health = BUILDING_HEALTH.FORGE;
+        building.maxHealth = BUILDING_HEALTH.FORGE;
+        break;
+      case BuildingType.FACTORY:
+        building.health = BUILDING_HEALTH.FACTORY;
+        building.maxHealth = BUILDING_HEALTH.FACTORY;
+        break;
+      default:
+        building.health = BUILDING_HEALTH.DEFAULT;
+        building.maxHealth = BUILDING_HEALTH.DEFAULT;
     }
     
     // Ajouter le bâtiment à l'état du jeu
