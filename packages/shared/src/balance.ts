@@ -10,17 +10,27 @@ import { ResourceType, BuildingType, BUILDING_COSTS } from './index';
 // Points de vie
 export const PLAYER_HEALTH = {
   MAX_HEALTH: 1000,
-  INVULNERABLE_TIME: 2000, // ms d'invulnérabilité après respawn
+  INVULNERABLE_TIME: 20000, // ms d'invulnérabilité après respawn
 };
 
 export const UNIT_HEALTH = {
   WARRIOR: {
     MAX_HEALTH: 100,
   },
+  VILLAGER: {
+    MAX_HEALTH: 50,
+  },
 };
 
 export const BUILDING_HEALTH = {
-  DEFAULT: 100,
+  DEFAULT: 1000,
+  TOWN_CENTER: 50000,
+  BARRACKS: 30000,
+  HOUSE: 1500,
+  WALL: 10000000,
+  FURNACE: 15000,
+  FORGE: 20000,
+  FACTORY: 25000,
 };
 
 // Dégâts
@@ -32,31 +42,39 @@ export const COMBAT = {
   // Modificateurs de dégâts
   DEFENSIVE_MODE_REDUCTION: 0.3, // Réduction de 30% en mode défensif
   PLAYER_DAMAGE_REDUCTION: 0.2, // Réduction de 20% contre les joueurs
+  BUILDING_DAMAGE_REDUCTION: 0.25, // Réduction de 25% contre les bâtiments
   
   // Paramètres d'attaque
   ATTACK_COOLDOWN: 500, // ms entre chaque attaque
   ATTACK_RANGE: 20, // pixels
+  
+  // Effets visuels
+  DAMAGE_FLASH_COUNT: 3, // Nombre de clignotements lors des dégâts
+  DAMAGE_FLASH_DURATION: 100, // Durée d'un clignotement en ms
+  
+  // Effets de balancing spécifiques
+  CRITICAL_HEALTH_THRESHOLD: 0.3, // Seuil de santé critique (30%)
 };
 
 // ====== RESSOURCES DE DÉPART DU JOUEUR ======
 
 // Quantités de ressources données au joueur lors de sa création
-export const PLAYER_STARTING_RESOURCES = {
-  [ResourceType.WOOD]: 100,
-  [ResourceType.STONE]: 100,
-  [ResourceType.GOLD]: 100,
-  [ResourceType.IRON]: 100,
-  [ResourceType.COAL]: 100,
-  [ResourceType.STEEL]: 100
-}; 
 // export const PLAYER_STARTING_RESOURCES = {
-//   [ResourceType.WOOD]: 0,
-//   [ResourceType.STONE]: 0,
-//   [ResourceType.GOLD]: 0,
-//   [ResourceType.IRON]: 0,
-//   [ResourceType.COAL]: 0,
-//   [ResourceType.STEEL]: 0
-// };
+//   [ResourceType.WOOD]: 1000,
+//   [ResourceType.STONE]: 1000,
+//   [ResourceType.GOLD]: 1000,
+//   [ResourceType.IRON]: 1000,
+//   [ResourceType.COAL]: 1000,
+//   [ResourceType.STEEL]: 1000
+// }; 
+export const PLAYER_STARTING_RESOURCES = {
+  [ResourceType.WOOD]: 0,
+  [ResourceType.STONE]: 0,
+  [ResourceType.GOLD]: 0,
+  [ResourceType.IRON]: 0,
+  [ResourceType.COAL]: 0,
+  [ResourceType.STEEL]: 0
+};
 
 // ====== COÛTS DE CONSTRUCTION ======
 

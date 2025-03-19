@@ -8,7 +8,7 @@ import {
   TILE_SIZE,
   CHUNK_SIZE,
   ResourceType,
-  UnitType,
+  // UnitType, // Supprimé pour éviter le conflit
   GameState as GameStateSchema
 } from "../schemas/GameState";
 
@@ -25,7 +25,8 @@ import {
   DEATH_SYSTEM,
   PLAYER_STARTING_RESOURCES,
   HARVEST_AMOUNT,
-  UnitState
+  UnitState,
+  UnitType // Importé uniquement depuis shared
 } from "shared";
 
 // Interfaces pour les données envoyées au client
@@ -825,8 +826,8 @@ export class GameRoom extends Room<GameStateSchema> {
     // Mettre à jour les positions des unités
     this.updateUnitPositions();
     
-    // Mettre à jour l'IA des villageois (réduit à 4 fois par seconde)
-    if (!this.lastVillagerAIUpdate || now - this.lastVillagerAIUpdate > 250) {
+    // Mettre à jour l'IA des villageois (10 fois par seconde)
+    if (!this.lastVillagerAIUpdate || now - this.lastVillagerAIUpdate > 100) {
       this.updateVillagerAI();
       this.lastVillagerAIUpdate = now;
     }
@@ -2111,37 +2112,48 @@ export class GameRoom extends Room<GameStateSchema> {
     });
   }
   
-  // Formation en mode suivi normal (derrière le joueur)
+  // Formation en mode suivi normal (autour du joueur)
   private updateUnitsFollowMode(player: PlayerSchema, playerUnits: UnitSchema[]) {
-    const FOLLOW_DISTANCE = TILE_SIZE * 0.6; // Encore plus près du joueur
-    const UNIT_SPACING = TILE_SIZE * 0.45; // Formations encore plus denses
+    const BASE_DISTANCE = TILE_SIZE * 0.6; // Distance de base du joueur
+    const UNIT_SPACING = TILE_SIZE * 0.4; // Espacement entre les unités
     
-    // Calculer les positions en formation plus naturelle
+    // Calculer les positions autour du joueur
     playerUnits.forEach((unit: UnitSchema, index: number) => {
-      // Utiliser une formation en demi-cercle plutôt qu'en grille pour un aspect plus naturel
       const unitCount = playerUnits.length;
       
-      // Calculer l'angle pour chaque unité
-      // Distribuer les unités sur un arc de cercle de 180 degrés derrière le joueur
-      const angleStep = Math.PI / Math.max(unitCount - 1, 1);
-      let angle = Math.PI / 2 - Math.PI / 2; // Commence à -90 degrés (quart inférieur gauche)
+      // Utiliser l'ID de l'unité comme seed pour la position
+      // Cela garantit que chaque unité conserve sa position relative
+      const unitIdSeed = parseInt(unit.id.replace(/\D/g, "")) || index;
       
-      if (unitCount > 1) {
-        angle += angleStep * index;
+      // Répartir les unités sur un cercle complet avec positions fixes
+      // Au lieu d'utiliser un angle aléatoire, calculer un angle fixe basé sur l'index et l'ID
+      const angleStep = (Math.PI * 2) / unitCount; 
+      const baseAngle = (unitIdSeed % unitCount) * angleStep;
+      
+      // Distribution plus régulière avec une légère préférence pour l'avant du joueur
+      let angle = baseAngle;
+      if (angle > Math.PI) {
+        // Compresser légèrement les angles à l'arrière pour avoir plus d'unités devant
+        angle = Math.PI + (angle - Math.PI) * 0.8;
       }
       
-      // Rayon du cercle basé sur le nombre d'unités (plus d'unités = cercle légèrement plus grand)
-      const radius = FOLLOW_DISTANCE + (Math.floor(index / 8) * UNIT_SPACING * 0.8);
+      // Distance fixe basée sur le nombre d'unités et l'index
+      // Création de "couches" si beaucoup d'unités
+      const layerIndex = Math.floor(index / Math.max(6, Math.min(12, unitCount)));
+      const distanceFactor = 1 + layerIndex * 0.3;
       
-      // Positions cibles relatives au joueur en utilisant des coordonnées polaires
-      // Ajout d'une légère variation pour un aspect plus naturel
-      const variationFactor = 0.15; // 15% de variation aléatoire
-      const radiusVariation = (1 - variationFactor/2) + Math.random() * variationFactor;
+      // Rayon avec variation minimale (5% max)
+      const baseRadius = BASE_DISTANCE * distanceFactor;
+      const radiusVariation = 0.05; // 5% de variation au maximum
+      // Utilisez l'ID comme seed pour la variation pour la rendre stable
+      const seedFraction = (unitIdSeed % 100) / 100;
+      const radius = baseRadius * (1 - radiusVariation/2 + seedFraction * radiusVariation);
       
-      let targetX = player.x + Math.cos(angle) * radius * radiusVariation;
-      let targetY = player.y + Math.sin(angle) * radius * radiusVariation;
+      // Positions cibles relatives au joueur
+      let targetX = player.x + Math.cos(angle) * radius;
+      let targetY = player.y + Math.sin(angle) * radius;
       
-      // Le reste du code existant pour le mouvement, la collision, etc.
+      // Mouvement vers la position cible
       this.moveUnitToTarget(unit, targetX, targetY, playerUnits, index);
     });
   }
@@ -2149,47 +2161,92 @@ export class GameRoom extends Room<GameStateSchema> {
   // Nouvelle méthode: Formation en mode cible (devant le joueur, face au curseur)
   private updateUnitsTargetMode(player: PlayerSchema, playerUnits: UnitSchema[]) {
     const unitCount = playerUnits.length;
+    if (unitCount === 0) return;
     
     // Calculer l'angle vers le curseur
     const angle = Math.atan2(player.cursorTargetY - player.y, player.cursorTargetX - player.x);
     
-    // Paramètres de formation
-    const ARC_WIDTH = Math.PI * 0.6; // Arc de 108 degrés (plus large que 90)
-    const DISTANCE_FACTOR = TILE_SIZE * 0.8; // Distance de base depuis le joueur
-    const UNITS_PER_ARC = 7; // Nombre maximum d'unités par arc
+    // Paramètres de formation défensive améliorés
+    const BASE_ARC_WIDTH = Math.PI * 0.4; // Arc de base (72 degrés)
+    const DISTANCE_FACTOR = TILE_SIZE * 0.5; // Distance réduite pour défense rapprochée
     
-    // Déterminer le nombre d'arcs nécessaires
-    const arcCount = Math.ceil(unitCount / UNITS_PER_ARC);
+    // Planifier la distribution inversée:
+    // - Moins d'unités aux premiers rangs (front)
+    // - Plus d'unités aux derniers rangs (arrière)
     
-    // Distribuer les unités sur plusieurs arcs
-    playerUnits.forEach((unit: UnitSchema, index: number) => {
-      // Déterminer à quel arc appartient cette unité
-      const arcIndex = Math.floor(index / UNITS_PER_ARC);
-      const indexInArc = index % UNITS_PER_ARC;
+    // Nombre minimum d'unités sur le premier rang
+    const MIN_UNITS_FIRST_RANK = Math.max(2, Math.min(5, Math.floor(unitCount / 5)));
+    
+    // Estimer le nombre de rangs pour répartir les unités
+    // On veut un minimum de 2 rangs si possible
+    const estimatedRanks = Math.max(2, Math.ceil(unitCount / 6));
+    
+    // Calculer la répartition des unités entre les rangs
+    // Créer d'abord un tableau de rangs avec le nombre d'unités pour chaque rang
+    let rankSizes: number[] = [];
+    let remainingUnits = unitCount;
+    let rankCount = 0;
+    
+    // Déterminer le nombre d'unités par rang, en augmentant progressivement
+    while (remainingUnits > 0) {
+      // Calculer combien d'unités pour ce rang
+      // Premier rang: minimum fixe
+      // Rangs suivants: augmentation progressive
+      let unitsForThisRank = rankCount === 0 
+        ? MIN_UNITS_FIRST_RANK 
+        : Math.min(remainingUnits, MIN_UNITS_FIRST_RANK + rankCount * 2);
       
-      // Calculer le nombre d'unités dans cet arc particulier
-      const unitsInThisArc = Math.min(UNITS_PER_ARC, unitCount - arcIndex * UNITS_PER_ARC);
+      // S'assurer qu'on a au moins 2 unités par rang
+      unitsForThisRank = Math.max(2, Math.min(unitsForThisRank, remainingUnits));
       
-      // Calculer l'angle de cette unité dans l'arc
-      const arcStartAngle = angle - ARC_WIDTH / 2;
-      const arcStepAngle = unitsInThisArc <= 1 ? 0 : ARC_WIDTH / (unitsInThisArc - 1);
-      const unitAngle = arcStartAngle + arcStepAngle * indexInArc;
+      // Ajouter ce rang à notre plan
+      rankSizes.push(unitsForThisRank);
+      remainingUnits -= unitsForThisRank;
+      rankCount++;
       
-      // Distance de cet arc particulier (les arcs plus éloignés sont plus distants)
-      const arcDistance = DISTANCE_FACTOR * (1 + arcIndex * 0.6);
+      // Limiter le nombre de rangs pour éviter les boucles infinies
+      if (rankCount >= 10) break;
+    }
+    
+    // Répartir les unités selon notre plan
+    let unitIndex = 0;
+    
+    // Pour chaque rang planifié
+    for (let rankIndex = 0; rankIndex < rankSizes.length; rankIndex++) {
+      const unitsInThisRank = rankSizes[rankIndex];
       
-      // Calculer la position cible
-      let targetX = player.x + Math.cos(unitAngle) * arcDistance;
-      let targetY = player.y + Math.sin(unitAngle) * arcDistance;
+      // Calculer la largeur de l'arc pour ce rang
+      // Les rangs de front (premiers) sont plus étroits que ceux de l'arrière
+      const arcWidthFactor = Math.min(1.5, 0.7 + rankIndex * 0.2);
+      const adaptiveArcWidth = BASE_ARC_WIDTH * arcWidthFactor;
       
-      // Ajouter un léger décalage aléatoire pour un aspect plus naturel
-      const variationFactor = 0.1; // 10% de variation
-      targetX += (Math.random() - 0.5) * TILE_SIZE * variationFactor;
-      targetY += (Math.random() - 0.5) * TILE_SIZE * variationFactor;
+      // Distance progressive depuis le joueur
+      const arcDistance = DISTANCE_FACTOR * (1 + rankIndex * 0.4);
       
-      // Déplacer l'unité vers sa position cible
-      this.moveUnitToTarget(unit, targetX, targetY, playerUnits, index);
-    });
+      // Positionner les unités sur ce rang
+      for (let i = 0; i < unitsInThisRank && unitIndex < unitCount; i++) {
+        const unit = playerUnits[unitIndex];
+        
+        // Calculer l'angle pour cette unité dans l'arc
+        const arcStartAngle = angle - adaptiveArcWidth / 2;
+        const arcStepAngle = unitsInThisRank <= 1 ? 0 : adaptiveArcWidth / (unitsInThisRank - 1);
+        const unitAngle = arcStartAngle + arcStepAngle * i;
+        
+        // Position standard basée sur l'angle et la distance
+        let targetX = player.x + Math.cos(unitAngle) * arcDistance;
+        let targetY = player.y + Math.sin(unitAngle) * arcDistance;
+        
+        // Ajouter un léger décalage aléatoire pour éviter les superpositions parfaites
+        const variationFactor = 0.03; // 3% de variation
+        targetX += (Math.random() - 0.5) * TILE_SIZE * variationFactor;
+        targetY += (Math.random() - 0.5) * TILE_SIZE * variationFactor;
+        
+        // Déplacer l'unité vers sa position cible
+        this.moveUnitToTarget(unit, targetX, targetY, playerUnits, unitIndex);
+        
+        unitIndex++;
+      }
+    }
   }
   
   // Nouvelle méthode pour déplacer les unités vers une position cible spécifique
@@ -2553,6 +2610,7 @@ export class GameRoom extends Room<GameStateSchema> {
     const now = Date.now();
     const allUnits = Array.from(this.state.units.values());
     const allPlayers = Array.from(this.state.players.entries());
+    const allBuildings = Array.from(this.state.buildings.entries());
     
     // Créer une grille spatiale pour optimiser la détection de proximité
     const GRID_SIZE = 100; // Taille de la cellule de la grille
@@ -2580,7 +2638,10 @@ export class GameRoom extends Room<GameStateSchema> {
         // Vérifier le cooldown d'attaque
         if (now - attacker.lastAttackTime < COMBAT.ATTACK_COOLDOWN) continue;
         
-        // Vérifier si l'unité peut attaquer d'autres unités dans la même cellule
+        // Priorité d'attaque : 1. Unités, 2. Joueurs, 3. Bâtiments
+        let hasAttacked = false;
+        
+        // 1. Vérifier si l'unité peut attaquer d'autres unités dans la même cellule
         for (const target of unitsInCell) {
           // Ne pas s'attaquer soi-même ou aux unités du même propriétaire
           if (target.id === attacker.id || target.owner === attacker.owner) continue;
@@ -2595,33 +2656,59 @@ export class GameRoom extends Room<GameStateSchema> {
           if (distance <= COMBAT.ATTACK_RANGE) {
             // L'unité attaque cette cible
             this.performAttack(attacker, target, now);
-            // Une seule attaque par tick
+            hasAttacked = true;
             break;
           }
         }
         
-        // Vérifier si l'unité peut attaquer un joueur
-        let hasAttackedPlayer = false;
-        allPlayers.forEach(([playerId, player]) => {
-          // Ne pas attaquer son propre joueur
-          if (attacker.owner === playerId || hasAttackedPlayer) return;
-          
-          // Ne pas attaquer les joueurs invulnérables ou morts
-          if (player.isInvulnerable || player.isDead) return;
-          
-          // Calculer la distance au joueur
-          const distance = Math.sqrt(
-            Math.pow(attacker.x - player.x, 2) + 
-            Math.pow(attacker.y - player.y, 2)
-          );
-          
-          // Vérifier si le joueur est à portée d'attaque
-          if (distance <= COMBAT.ATTACK_RANGE) {
-            // L'unité attaque le joueur
-            this.performPlayerAttack(attacker, player, playerId, now);
-            hasAttackedPlayer = true; // Marquer qu'une attaque a été effectuée
+        // 2. Vérifier si l'unité peut attaquer un joueur
+        if (!hasAttacked) {
+          for (const [playerId, player] of allPlayers) {
+            // Ne pas attaquer son propre joueur
+            if (attacker.owner === playerId) continue;
+            
+            // Ne pas attaquer les joueurs invulnérables ou morts
+            if (player.isInvulnerable || player.isDead) continue;
+            
+            // Calculer la distance au joueur
+            const distance = Math.sqrt(
+              Math.pow(attacker.x - player.x, 2) + 
+              Math.pow(attacker.y - player.y, 2)
+            );
+            
+            // Vérifier si le joueur est à portée d'attaque
+            if (distance <= COMBAT.ATTACK_RANGE) {
+              // L'unité attaque le joueur
+              this.performPlayerAttack(attacker, player, playerId, now);
+              hasAttacked = true;
+              break;
+            }
           }
-        });
+        }
+        
+        // 3. Vérifier si l'unité peut attaquer un bâtiment
+        if (!hasAttacked) {
+          for (const [buildingId, building] of allBuildings) {
+            // Ne pas attaquer ses propres bâtiments
+            if (attacker.owner === building.owner) continue;
+            
+            // Calculer la distance au centre du bâtiment
+            const buildingCenterX = building.x + TILE_SIZE/2;
+            const buildingCenterY = building.y + TILE_SIZE/2;
+            const distance = Math.sqrt(
+              Math.pow(attacker.x - buildingCenterX, 2) + 
+              Math.pow(attacker.y - buildingCenterY, 2)
+            );
+            
+            // Vérifier si le bâtiment est à portée d'attaque (légèrement augmentée)
+            if (distance <= COMBAT.ATTACK_RANGE + 8) {
+              // L'unité attaque le bâtiment
+              this.performBuildingAttack(attacker, building, buildingId, now);
+              hasAttacked = true;
+              break;
+            }
+          }
+        }
       }
     }
   }
@@ -3441,5 +3528,40 @@ export class GameRoom extends Room<GameStateSchema> {
     }
     
     return resourcesInRange;
+  }
+
+  // Méthode pour gérer une attaque sur un bâtiment
+  private performBuildingAttack(attacker: UnitSchema, building: BuildingSchema, buildingId: string, now: number) {
+    // Mettre à jour le temps de la dernière attaque
+    attacker.lastAttackTime = now;
+    
+    // Calculer les dégâts avec la réduction pour les bâtiments
+    const baseDamage = attacker.damage * (1 - COMBAT.BUILDING_DAMAGE_REDUCTION) * (1 - COMBAT.DAMAGE_RANDOM_VARIATION + Math.random() * COMBAT.DAMAGE_RANDOM_VARIATION * 2);
+    
+    // Arrondir les dégâts
+    const finalDamage = Math.round(baseDamage);
+    
+    // Appliquer les dégâts
+    building.health -= finalDamage;
+    
+    // Limiter à 0 minimum
+    if (building.health < 0) building.health = 0;
+    
+    console.log(`Bâtiment ${buildingId} attaqué - Santé après: ${building.health}/${building.maxHealth}`);
+    
+    // Si le bâtiment est détruit
+    if (building.health <= 0) {
+      // Détruire le bâtiment
+      this.handleDestroyBuilding(buildingId);
+    }
+    
+    // Notifier les clients des dégâts
+    this.broadcast("buildingDamaged", {
+      buildingId: buildingId,
+      damage: finalDamage,
+      health: building.health,
+      maxHealth: building.maxHealth,
+      attackerId: attacker.id
+    });
   }
 } 

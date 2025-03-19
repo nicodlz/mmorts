@@ -50,7 +50,7 @@ export class UIScene extends Phaser.Scene {
     [BuildingType.TOWN_CENTER]: 'tc',
     [BuildingType.YARD]: 'quarry',
     [BuildingType.CABIN]: 'hut',
-    [BuildingType.PLAYER_WALL]: 'playerwall'
+    [BuildingType.PLAYER_WALL]: 'playerWall'
   };
   
   constructor() {
@@ -68,7 +68,7 @@ export class UIScene extends Phaser.Scene {
     this.load.image('tc', '/sprites/tc.png');
     this.load.image('quarry', '/sprites/quarry.png');
     this.load.image('hut', '/sprites/hut.png');
-    this.load.image('playerwall', '/sprites/playerWall.png');
+    this.load.image('playerWall', '/sprites/playerWall.png');
   }
   
   create() {
@@ -802,7 +802,7 @@ export class UIScene extends Phaser.Scene {
       { type: BuildingType.BARRACKS, name: 'Barracks', sprite: 'barracks', cost: { wood: 10, iron: 10 } },
       { type: BuildingType.FURNACE, name: 'Furnace', sprite: 'furnace', cost: { stone: 30 } },
       { type: BuildingType.FACTORY, name: 'Factory', sprite: 'factory', cost: { iron: 20, stone: 20 } },
-      { type: BuildingType.PLAYER_WALL, name: 'Wall', sprite: 'playerwall', cost: { stone: 10 } },
+      { type: BuildingType.PLAYER_WALL, name: 'Wall', sprite: 'playerWall', cost: { stone: 10 } },
       { type: BuildingType.TOWER, name: 'Tower', sprite: 'tower', cost: { wood: 50, iron: 5 } },
       { type: BuildingType.TOWN_CENTER, name: 'Town Center', sprite: 'tc', cost: { stone: 30, wood: 30, gold: 30 } },
       { type: BuildingType.YARD, name: 'Quarry', sprite: 'quarry', cost: { iron: 20 } },

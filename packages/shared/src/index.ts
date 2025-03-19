@@ -17,10 +17,10 @@ export enum BuildingType {
   FACTORY = "factory",
   TOWER = "tower",
   BARRACKS = "barracks",
-  TOWN_CENTER = "town_center",
-  YARD = "yard",
-  CABIN = "cabin",
-  PLAYER_WALL = "player_wall"
+  TOWN_CENTER = "tc",
+  YARD = "quarry",
+  CABIN = "hut",
+  PLAYER_WALL = "playerWall"
 }
 
 export enum UnitType {

@@ -11,7 +11,8 @@ import {
   BUILDING_COSTS,
   BuildingType,
   HARVEST_AMOUNT,
-  RESOURCE_AMOUNTS
+  RESOURCE_AMOUNTS,
+  COMBAT
 } from 'shared';
 import { PerformanceManager, QualityLevel } from '../utils/PerformanceManager';
 import { ObjectPool } from '../utils/ObjectPool';
@@ -50,6 +51,14 @@ export class GameScene extends Phaser.Scene {
     targetY: number;
     nameText?: Phaser.GameObjects.Text;
     walkingPhase?: number;
+    lastUpdateTime?: number;
+    startX?: number;
+    startY?: number;
+    elapsedTime?: number;
+    previousTargetX?: number;
+    previousTargetY?: number;
+    lastPos?: { x: number, y: number };
+    velocity?: { x: number, y: number };
   }> = new Map();
   private buildingSprites: Map<string, Phaser.GameObjects.Sprite> = new Map();
   private otherPlayers: Map<string, Phaser.GameObjects.Container> = new Map(); // Autres joueurs
@@ -145,7 +154,7 @@ export class GameScene extends Phaser.Scene {
     [BuildingType.TOWN_CENTER]: 'tc',
     [BuildingType.YARD]: 'quarry',
     [BuildingType.CABIN]: 'hut',
-    [BuildingType.PLAYER_WALL]: 'playerwall'
+    [BuildingType.PLAYER_WALL]: 'playerWall'
   };
   
   // Initialiser les variables pour la sélection de bâtiment
@@ -230,25 +239,25 @@ export class GameScene extends Phaser.Scene {
     this.load.image('stone', 'sprites/stone.png');
     
     // Charger les sprites des bâtiments
-    this.load.image('forge', 'sprites/forge.png');
-    this.load.image('house', 'sprites/house.png');
-    this.load.image('furnace', 'sprites/furnace.png');
-    this.load.image('factory', 'sprites/factory.png');
-    this.load.image('tower', 'sprites/tower.png');
-    this.load.image('barracks', 'sprites/barracks.png');
-    this.load.image('town_center', 'sprites/tc.png');
-    this.load.image('yard', 'sprites/quarry.png');
-    this.load.image('cabin', 'sprites/hut.png');
-    this.load.image('player_wall', 'sprites/playerWall.png');
+    this.load.image('forge', '/sprites/forge.png');
+    this.load.image('house', '/sprites/house.png');
+    this.load.image('furnace', '/sprites/furnace.png');
+    this.load.image('factory', '/sprites/factory.png');
+    this.load.image('tower', '/sprites/tower.png');
+    this.load.image('barracks', '/sprites/barracks.png');
+    this.load.image('tc', '/sprites/tc.png');
+    this.load.image('quarry', '/sprites/quarry.png');
+    this.load.image('hut', '/sprites/hut.png');
+    this.load.image('playerWall', '/sprites/playerWall.png');
     
     // Charger les tuiles de terrain
-    this.load.image('grass', 'sprites/grass.png');
-    this.load.image('grass2', 'sprites/grass2.png');
-    this.load.image('grass3', 'sprites/grass3.png');
-    this.load.image('wall', 'sprites/wall.png');
+    this.load.image('grass', '/sprites/grass.png');
+    this.load.image('grass2', '/sprites/grass2.png');
+    this.load.image('grass3', '/sprites/grass3.png');
+    this.load.image('wall', '/sprites/wall.png');
     
     // Charger la carte
-    this.load.text('map', 'default.map');
+    this.load.text('map', '/default.map');
     
     console.log("Fin de la configuration du chargement");
   }
@@ -1020,10 +1029,10 @@ export class GameScene extends Phaser.Scene {
               buildingSprite.data.set('productionProgress', building.productionProgress);
             }
             
-            // Mettre à jour la santé si nécessaire
+            // Mettre à jour la santé et la barre de vie si nécessaire
             if (building.health !== undefined) {
-              buildingSprite.data.set('health', building.health);
-              buildingSprite.data.set('maxHealth', building.maxHealth);
+              buildingSprite.setData('health', building.health);
+              buildingSprite.setData('maxHealth', building.maxHealth);
             }
           } else {
             // Si le bâtiment n'existe pas encore, le créer
@@ -1057,17 +1066,66 @@ export class GameScene extends Phaser.Scene {
         return;
       }
       
-      console.log(`Reçu ${message.units.length} positions d'unités`);
+      // Réduire les logs pour éviter de surcharger la console
+      if (Math.random() < 0.01) { // Seulement 1% des messages
+        console.log(`Reçu ${message.units.length} positions d'unités`);
+      }
+      
+      const currentTime = this.time.now;
       
       // Mettre à jour les positions des unités
       message.units.forEach(unit => {
         // Vérifier si l'unité existe déjà dans notre collection
         if (this.unitSprites.has(unit.id)) {
-          // Mettre à jour la position cible
+          // Récupérer les données de l'unité
           const unitData = this.unitSprites.get(unit.id);
           if (unitData) {
+            // Initialiser lastPos et velocity s'ils n'existent pas
+            if (!unitData.lastPos) {
+              unitData.lastPos = { x: unitData.sprite.x, y: unitData.sprite.y };
+            }
+            if (!unitData.velocity) {
+              unitData.velocity = { x: 0, y: 0 };
+            }
+            
+            // Stocker l'ancienne position cible
+            const oldTargetX = unitData.targetX !== undefined ? unitData.targetX : unitData.sprite.x;
+            const oldTargetY = unitData.targetY !== undefined ? unitData.targetY : unitData.sprite.y;
+            
+            // Mise à jour de la position cible
             unitData.targetX = unit.x;
             unitData.targetY = unit.y;
+            
+            // Calculer la différence entre la nouvelle position et l'ancienne
+            const dx = unit.x - oldTargetX;
+            const dy = unit.y - oldTargetY;
+            
+            // Même si le mouvement est faible, on veut calculer une vélocité
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            
+            // Calculer le temps écoulé depuis la dernière mise à jour
+            const timeSinceLastUpdate = unitData.lastUpdateTime ? 
+              currentTime - unitData.lastUpdateTime : 100;
+            
+            // Calculer la vitesse en fonction du temps (avec un minimum pour éviter division par 0)
+            const updateTimeMs = Math.max(timeSinceLastUpdate, 50);
+            
+            // Temps pour parcourir la distance (en ms) - maintenant 100ms pour les villageois
+            const timeToTravel = 100; // Mise à jour 10 fois par seconde
+            
+            // Si la distance est significative, mettre à jour la vélocité
+            if (dist > 0.01) {
+              // Calculer la vélocité en unités par ms
+              unitData.velocity.x = dx / timeToTravel;
+              unitData.velocity.y = dy / timeToTravel;
+              
+              // Enregistrer la dernière position pour le prochain calcul
+              unitData.lastPos.x = oldTargetX;
+              unitData.lastPos.y = oldTargetY;
+            }
+            
+            // Mettre à jour le temps de dernière mise à jour
+            unitData.lastUpdateTime = currentTime;
           }
         } else {
           // Si l'unité n'existe pas encore, la créer
@@ -1806,8 +1864,9 @@ export class GameScene extends Phaser.Scene {
       sprite.setAlpha(1);
       sprite.setScale(1);
       
-      // Utiliser une zone d'interaction agrandie pour faciliter le clic
-      const hitArea = new Phaser.Geom.Rectangle(-TILE_SIZE/2 - 5, -TILE_SIZE/2 - 5, TILE_SIZE + 10, TILE_SIZE + 10);
+      // Utiliser une zone d'interaction spécifiquement ajustée pour correspondre à la partie visible du bâtiment
+      // La zone de clic est déplacée vers le bas pour mieux correspondre à l'apparence du bâtiment
+      const hitArea = new Phaser.Geom.Rectangle(-TILE_SIZE/2 - 5, 0, TILE_SIZE + 10, TILE_SIZE);
       sprite.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
       
       // Ajouter des événements de débogage
@@ -1843,6 +1902,10 @@ export class GameScene extends Phaser.Scene {
           // Créer une barre de couleur sous le bâtiment
           const barWidth = TILE_SIZE * 0.8;
           const barHeight = 4;
+          
+          // Calculer le pourcentage de santé
+          const healthPercentage = Math.max(0, Math.min(1, building.health / building.maxHealth));
+          
           const bar = this.add.rectangle(
             sprite.x,
             sprite.y + TILE_SIZE/2 + 2,
@@ -1850,9 +1913,12 @@ export class GameScene extends Phaser.Scene {
             barHeight,
             ownerColor
           );
-          bar.setDepth(11);
           
-          // Stocker une référence à la barre de couleur
+          // Origine centrée
+          bar.setOrigin(0.5, 0.5);
+          bar.setDepth(9); // Profondeur réduite pour être sous le bâtiment (qui est à 10)
+          
+          // Stocker la référence à la barre
           sprite.setData('ownerBar', bar);
         }
       }
@@ -1868,7 +1934,7 @@ export class GameScene extends Phaser.Scene {
           0x444444
         );
         progressBg.setAlpha(0.7);
-        progressBg.setDepth(11);
+        progressBg.setDepth(9); // Profondeur réduite pour être sous le bâtiment (qui est à 10)
         
         // Barre de progression (verte)
         const progressBar = this.add.rectangle(
@@ -1879,7 +1945,7 @@ export class GameScene extends Phaser.Scene {
           0x00ff00
         );
         progressBar.setOrigin(0, 0.5); // Origine à gauche pour l'animation
-        progressBar.setDepth(12);
+        progressBar.setDepth(9); // Profondeur réduite pour être sous le bâtiment (qui est à 10)
         
         // Stocker des références aux barres pour les mises à jour
         sprite.setData('progressBg', progressBg);
@@ -1899,9 +1965,13 @@ export class GameScene extends Phaser.Scene {
         buildingSprite.setPosition(building.x + TILE_SIZE/2, building.y + TILE_SIZE/2);
       }
       
-      // Mettre à jour d'autres propriétés si nécessaire (santé, état, etc.)
+      // Mettre à jour la santé et la barre de vie si nécessaire
       if (building.health !== undefined) {
-        // Ajouter une barre de vie ou un indicateur visuel si nécessaire
+        const currentHealth = buildingSprite.getData('health') || building.maxHealth;
+        if (currentHealth !== building.health) {
+          buildingSprite.setData('health', building.health);
+          buildingSprite.setData('maxHealth', building.maxHealth);
+        }
       }
     };
     
@@ -2258,6 +2328,25 @@ export class GameScene extends Phaser.Scene {
         }
       }
     });
+
+    // Écouter les dégâts subis par les bâtiments
+    this.room.onMessage("buildingDamaged", (data: any) => {
+      console.log("Bâtiment endommagé:", data);
+      
+      // Récupérer le sprite du bâtiment
+      const buildingSprite = this.buildingSprites.get(data.buildingId);
+      if (!buildingSprite) return;
+      
+      // Montrer l'effet de dégâts
+      this.showDamageEffect(buildingSprite.x, buildingSprite.y - 10, data.damage);
+      
+      // Ajouter effet visuel de dégâts (clignotement)
+      this.addDamageFlashEffect(buildingSprite);
+      
+      // Mettre à jour les données de santé (sans mettre à jour la barre de vie)
+      buildingSprite.setData('health', data.health);
+      buildingSprite.setData('maxHealth', data.maxHealth);
+    });
   }
   
   // Crée un sprite pour un autre joueur
@@ -2468,7 +2557,7 @@ export class GameScene extends Phaser.Scene {
         const buildingCenterY = building.y + TILE_SIZE/2;
         const distance = Phaser.Math.Distance.Between(x, y, buildingCenterX, buildingCenterY);
         
-        if (distance < 12) { // Collision avec une partie centrale du bâtiment
+        if (distance < 22) { // Augmenté de 12 à 22 pixels pour une collision plus large
           return true;
         }
       }
@@ -2487,8 +2576,28 @@ export class GameScene extends Phaser.Scene {
       // Détecter les collisions avec des formes spécifiques selon le type de ressource
       switch (resourceType) {
         case 'gold':
-          // L'or a une forme circulaire plus petite (centre uniquement)
-          if (Phaser.Math.Distance.Between(x, y, resourceX, resourceY) < 14) {
+          // L'or utilise un octogone avec un rayon de 28 pixels
+          const goldCorners = [
+            {dx: -19, dy: -8}, {dx: -8, dy: -19}, 
+            {dx: 8, dy: -19}, {dx: 19, dy: -8},
+            {dx: 19, dy: 8}, {dx: 8, dy: 19}, 
+            {dx: -8, dy: 19}, {dx: -19, dy: 8}
+          ];
+          
+          // Vérifier si le point est à l'intérieur du polygone octogonal
+          let insideGold = false;
+          for (let i = 0, j = goldCorners.length - 1; i < goldCorners.length; j = i++) {
+            const xi = resourceX + goldCorners[i].dx;
+            const yi = resourceY + goldCorners[i].dy;
+            const xj = resourceX + goldCorners[j].dx;
+            const yj = resourceY + goldCorners[j].dy;
+            
+            const intersect = ((yi > y) !== (yj > y)) &&
+                (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+            if (intersect) insideGold = !insideGold;
+          }
+          
+          if (insideGold) {
             return true;
           }
           break;
@@ -2508,36 +2617,28 @@ export class GameScene extends Phaser.Scene {
           break;
           
         case 'stone':
-          // Les pierres ont une forme octogonale
-          // On utilise une approximation avec plusieurs tests de points
-          
-          // Test central - zone principale de la pierre
-          if (Phaser.Math.Distance.Between(x, y, resourceX, resourceY) < 14) {
-            return true;
-          }
-          
-          // Tests sur les côtés de l'octogone
-          const corners = [
-            {dx: -11, dy: -4}, {dx: -6, dy: -11}, 
-            {dx: 6, dy: -11}, {dx: 11, dy: -4},
-            {dx: 11, dy: 4}, {dx: 6, dy: 11}, 
-            {dx: -6, dy: 11}, {dx: -11, dy: 4}
+          // Les pierres utilisent un octogone avec un rayon de 29 pixels
+          const stoneCorners = [
+            {dx: -20, dy: -8}, {dx: -8, dy: -20}, 
+            {dx: 8, dy: -20}, {dx: 20, dy: -8},
+            {dx: 20, dy: 8}, {dx: 8, dy: 20}, 
+            {dx: -8, dy: 20}, {dx: -20, dy: 8}
           ];
           
           // Vérifier si le point est à l'intérieur du polygone octogonal
-          let inside = false;
-          for (let i = 0, j = corners.length - 1; i < corners.length; j = i++) {
-            const xi = resourceX + corners[i].dx;
-            const yi = resourceY + corners[i].dy;
-            const xj = resourceX + corners[j].dx;
-            const yj = resourceY + corners[j].dy;
+          let insideStone = false;
+          for (let i = 0, j = stoneCorners.length - 1; i < stoneCorners.length; j = i++) {
+            const xi = resourceX + stoneCorners[i].dx;
+            const yi = resourceY + stoneCorners[i].dy;
+            const xj = resourceX + stoneCorners[j].dx;
+            const yj = resourceY + stoneCorners[j].dy;
             
             const intersect = ((yi > y) !== (yj > y)) &&
                 (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-            if (intersect) inside = !inside;
+            if (intersect) insideStone = !insideStone;
           }
           
-          if (inside) {
+          if (insideStone) {
             return true;
           }
           break;
@@ -4435,78 +4536,93 @@ export class GameScene extends Phaser.Scene {
 
   // Ajouter cette méthode pour mettre à jour les unités
   private updateUnits(delta: number) {
+    // Constante pour la durée d'interpolation (même valeur que updateVillagerAI côté serveur)
+    const INTERPOLATION_DURATION = 250; // 250ms entre les mises à jour du serveur
+
     // Parcourir toutes les unités
     this.unitSprites.forEach((unitData, unitId) => {
       if (unitData.targetX !== undefined && unitData.targetY !== undefined) {
         // Vérifier si c'est un joueur ou une unité
         const isPlayer = this.room && this.room.state && this.room.state.players.has(unitId);
         
-        // Calculer le facteur d'interpolation basé sur delta et le facteur de performance
-        // Pour les unités: utiliser un facteur plus doux (0.8 au lieu de 1.5)
-        const lerpFactor = Math.min(PerformanceManager.lerpFactor * delta / 16 * (isPlayer ? 1 : 0.8), 1);
-        
-        // Position actuelle
-        const currentX = unitData.sprite.x;
-        const currentY = unitData.sprite.y;
-        
-        // Distance à parcourir
-        const distToTarget = Phaser.Math.Distance.Between(currentX, currentY, unitData.targetX, unitData.targetY);
-        
-        // Utiliser une fonction d'easing pour un mouvement plus fluide
-        // Fonction easeInOutQuad pour une accélération et décélération progressives
-        const easeInOutQuad = (t: number): number => {
-          return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
-        };
-        
-        // Appliquer l'easing au facteur d'interpolation pour des mouvements plus naturels
-        const easedFactor = easeInOutQuad(lerpFactor);
-        
-        // Utiliser l'interpolation linéaire avec le facteur modifié par l'easing
-        const newX = Phaser.Math.Linear(currentX, unitData.targetX, easedFactor);
-        const newY = Phaser.Math.Linear(currentY, unitData.targetY, easedFactor);
-        
-        // Mettre à jour la position du container
-        unitData.sprite.setPosition(newX, newY);
-        
-        // Animation de marche seulement pour les unités (pas pour les joueurs)
-        if (!isPlayer) {
-          const unitRect = unitData.sprite.getAt(0) as Phaser.GameObjects.Rectangle;
+        // Pour les joueurs, utiliser l'interpolation standard
+        if (isPlayer) {
+          // Calculer le facteur d'interpolation basé sur delta
+          const lerpFactor = Math.min(PerformanceManager.lerpFactor * delta / 16, 1);
           
+          // Appliquer l'interpolation linéaire pour un mouvement fluide
+          unitData.sprite.x = Phaser.Math.Linear(unitData.sprite.x, unitData.targetX, lerpFactor);
+          unitData.sprite.y = Phaser.Math.Linear(unitData.sprite.y, unitData.targetY, lerpFactor);
+          
+          // Mettre à jour la position du nom si nécessaire
+          if (unitData.nameText) {
+            unitData.nameText.setPosition(unitData.sprite.x, unitData.sprite.y - 22);
+          }
+        } 
+        // Pour les unités (comme les villageois), utiliser l'extrapolation de mouvement
+        else {
+          // S'assurer que les propriétés de suivi sont initialisées
+          if (!unitData.lastPos) {
+            unitData.lastPos = { x: unitData.sprite.x, y: unitData.sprite.y };
+          }
+          if (!unitData.velocity) {
+            unitData.velocity = { x: 0, y: 0 };
+          }
+          
+          // Vérifier si l'unité est en mouvement (avec un seuil très bas)
+          const isMoving = Math.abs(unitData.velocity.x) > 0.00001 || Math.abs(unitData.velocity.y) > 0.00001;
+          
+          if (isMoving) {
+            // Appliquer le mouvement extrapolé avec le delta
+            unitData.sprite.x += unitData.velocity.x * delta;
+            unitData.sprite.y += unitData.velocity.y * delta;
+            
+            // Vérifier si on a dépassé la cible
+            const passedTargetX = (unitData.velocity.x > 0 && unitData.sprite.x > unitData.targetX) ||
+                                (unitData.velocity.x < 0 && unitData.sprite.x < unitData.targetX);
+            const passedTargetY = (unitData.velocity.y > 0 && unitData.sprite.y > unitData.targetY) ||
+                                (unitData.velocity.y < 0 && unitData.sprite.y < unitData.targetY);
+            
+            // Si on a dépassé la cible, se placer exactement dessus
+            if (passedTargetX) unitData.sprite.x = unitData.targetX;
+            if (passedTargetY) unitData.sprite.y = unitData.targetY;
+          }
+          // Si l'unité est très proche de sa cible, utiliser une interpolation simple
+          else if (Math.abs(unitData.sprite.x - unitData.targetX) > 0.1 || 
+                   Math.abs(unitData.sprite.y - unitData.targetY) > 0.1) {
+            // Interpolation plus rapide pour les derniers pixels
+            unitData.sprite.x = Phaser.Math.Linear(unitData.sprite.x, unitData.targetX, 0.3);
+            unitData.sprite.y = Phaser.Math.Linear(unitData.sprite.y, unitData.targetY, 0.3);
+          }
+          
+          // Animation de marche
+          const unitRect = unitData.sprite.getAt(0) as Phaser.GameObjects.Rectangle;
           if (unitRect) {
             // Vérifier si l'unité est en train de récolter
             const isHarvesting = unitData.sprite.getData('harvesting');
             
             if (isHarvesting) {
-              // Animation de récolte (oscillation plus rapide et plus prononcée)
-              if (!unitData.walkingPhase) {
-                unitData.walkingPhase = 0;
-              }
-              
-              // Animation plus rapide pour la récolte
-              unitData.walkingPhase += delta * 0.015; // Plus rapide que la marche
-              
-              // Oscillation plus prononcée pour la récolte
-              const harvestAngle = Math.sin(unitData.walkingPhase) * 0.1; // Amplitude plus grande
-              unitRect.setRotation(harvestAngle);
+              // Animation de récolte
+              if (!unitData.walkingPhase) unitData.walkingPhase = 0;
+              unitData.walkingPhase = (unitData.walkingPhase || 0) + delta * 0.015;
+              const harvestAngle = Math.sin(unitData.walkingPhase) * 0.1;
+              unitRect.rotation = harvestAngle;
             }
-            // Sinon, animation de marche standard
-            else if (distToTarget > 0.2) {
-              // Oscillation de la rotation pour simuler la marche
-              if (!unitData.walkingPhase) {
-                unitData.walkingPhase = 0;
-              }
-              
-              // Réduire la vitesse d'oscillation pour un effet plus naturel
-              unitData.walkingPhase += delta * 0.007; // Était 0.01
-              
-              // Appliquer une légère rotation sinusoïdale pour simuler la marche
-              // Réduire l'amplitude de 0.05 à 0.03 pour une oscillation plus subtile
-              const walkAngle = Math.sin(unitData.walkingPhase) * 0.03;
-              unitRect.setRotation(walkAngle);
+            // Animation de marche uniquement si l'unité se déplace
+            else if (isMoving) {
+              if (!unitData.walkingPhase) unitData.walkingPhase = 0;
+              unitData.walkingPhase = (unitData.walkingPhase || 0) + delta * 0.01;
+              const walkAngle = Math.sin(unitData.walkingPhase) * 0.05;
+              unitRect.rotation = walkAngle;
             } else {
               // Stabiliser la rotation quand immobile
-              unitRect.setRotation(0);
+              unitRect.rotation = 0;
             }
+          }
+          
+          // Mettre à jour la position du nom si nécessaire
+          if (unitData.nameText) {
+            unitData.nameText.setPosition(unitData.sprite.x, unitData.sprite.y - 22);
           }
         }
       }
@@ -4676,7 +4792,8 @@ export class GameScene extends Phaser.Scene {
     const healthPercentage = Math.max(0, Math.min(1, currentHealth / maxHealth));
     
     // Déterminer la couleur en fonction de la santé
-    const color = healthPercentage > 0.6 ? 0x00ff00 : healthPercentage > 0.3 ? 0xffff00 : 0xff0000;
+    const color = healthPercentage > 0.6 ? 0x00ff00 : 
+                   healthPercentage > COMBAT.CRITICAL_HEALTH_THRESHOLD ? 0xffff00 : 0xff0000;
     
     // Fond de la barre (gris foncé)
     this.healthBar.fillStyle(0x333333, 0.8);
@@ -5066,7 +5183,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   // Ajouter un effet de clignotement d'opacité pour les dégâts
-  private addDamageFlashEffect(target: Phaser.GameObjects.GameObject, flashes: number = 3, flashDuration: number = 100) {
+  private addDamageFlashEffect(target: Phaser.GameObjects.GameObject, flashes: number = COMBAT.DAMAGE_FLASH_COUNT, flashDuration: number = COMBAT.DAMAGE_FLASH_DURATION) {
     // Arrêter toute animation d'opacité en cours
     this.tweens.killTweensOf(target);
     
@@ -5390,8 +5507,19 @@ export class GameScene extends Phaser.Scene {
     // Récupérer la texture appropriée
     const textureName = GameScene.BUILDING_SPRITES[building.type] || 'building_unknown';
     
-    // Créer le sprite
-    const sprite = this.add.sprite(building.x, building.y, textureName);
+    // Créer le sprite avec un offset de TILE_SIZE/2 pour aligner avec la méthode onAdd
+    const sprite = this.add.sprite(
+      building.x + TILE_SIZE/2,
+      building.y + TILE_SIZE/2, 
+      textureName
+    );
+    
+    // Définir la profondeur pour que le bâtiment apparaisse au-dessus des tuiles
+    sprite.setDepth(10);
+    
+    // Assurer que le sprite est bien visible et correctement configuré
+    sprite.setAlpha(1);
+    sprite.setScale(1);
     
     // Stocker les données du bâtiment
     sprite.setData('id', building.id);
@@ -5415,11 +5543,30 @@ export class GameScene extends Phaser.Scene {
     // Ajouter le sprite à la map des bâtiments
     this.buildingSprites.set(building.id, sprite);
     
-    // Rendre le bâtiment interactif
-    sprite.setInteractive();
+    // Rendre le bâtiment interactif avec une zone d'interaction ajustée pour corriger le décalage
+    // La zone est volontairement déplacée vers le bas pour mieux correspondre à l'apparence visuelle
+    // Utiliser un rectangle plus bas que celui par défaut
+    const hitArea = new Phaser.Geom.Rectangle(-TILE_SIZE/2 - 5, 0, TILE_SIZE + 10, TILE_SIZE);
+    sprite.setInteractive(hitArea, Phaser.Geom.Rectangle.Contains);
+    
+    // Ajouter des gestionnaires d'événements de débogage pour le diagnostic
+    sprite.on('pointerover', () => {
+      console.log(`Survol du bâtiment: ${building.id}`);
+      sprite.setTint(0xaaffaa);
+    });
+    
+    sprite.on('pointerout', () => {
+      console.log(`Fin de survol du bâtiment: ${building.id}`);
+      if (this.selectedBuilding !== building.id) {
+        sprite.setTint(0xffffff);
+      } else {
+        sprite.setTint(0x00ffff);
+      }
+    });
     
     // Ajouter un gestionnaire de clic
     sprite.on('pointerdown', () => {
+      console.log(`Clic sur le bâtiment: ${building.id}`);
       this.selectBuilding(building.id);
     });
     
@@ -5458,5 +5605,10 @@ export class GameScene extends Phaser.Scene {
         }
       }
     });
+  }
+
+  // Mettre à jour la barre de vie d'un bâtiment
+  private updateBuildingHealthBar(buildingSprite: Phaser.GameObjects.Sprite, currentHealth: number, maxHealth: number) {
+    // Cette fonction est supprimée car nous revenons à une simple barre colorée pour le propriétaire
   }
 } 

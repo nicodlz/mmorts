@@ -1,6 +1,6 @@
 import { Schema, type, MapSchema } from "@colyseus/schema";
-import { PLAYER_HEALTH, UNIT_HEALTH, BUILDING_HEALTH } from "shared";
-import { UnitState } from "shared";
+import { PLAYER_HEALTH, UNIT_HEALTH, BUILDING_HEALTH, COMBAT } from "shared";
+import { UnitState, UnitType } from "shared";
 
 // Types de ressources
 export enum ResourceType {
@@ -26,11 +26,11 @@ export enum BuildingType {
   PLAYER_WALL = "player_wall"
 }
 
-// Types d'unités
-export enum UnitType {
-  WARRIOR = "warrior",
-  VILLAGER = "villager"
-}
+// Réexporter UnitType depuis shared pour éviter les conflits
+// export enum UnitType {
+//   WARRIOR = "warrior",
+//   VILLAGER = "villager"
+// }
 
 // Schéma pour un joueur
 export class PlayerSchema extends Schema {
@@ -75,7 +75,7 @@ export class UnitSchema extends Schema {
   @type("boolean") isClickTargeting: boolean = false; // Indique si l'unité se déplace vers un point cliqué
   
   // Nouvelles propriétés pour le système de combat
-  @type("number") damage: number = 25; // Dégâts de base
+  @type("number") damage: number = COMBAT.UNIT_BASE_DAMAGE; // Dégâts de base
   @type("number") lastAttackTime: number = 0; // Timestamp de la dernière attaque
   @type("string") attackTarget: string = ""; // ID de la cible actuelle
   
