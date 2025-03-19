@@ -1,0 +1,38 @@
+[33mcommit 0132478226a7bfc921e6ea020435708c9ab2a8b4[m
+Author: nicodlz <nicolasletimon@gmail.com>
+Date:   Fri Mar 14 06:49:09 2025 +0000
+
+    new graphics + performance
+
+apps/client/public/default.map
+apps/client/public/sprites/barracks.png
+apps/client/public/sprites/factory.png
+apps/client/public/sprites/forge.png
+apps/client/public/sprites/furnace.png
+apps/client/public/sprites/gold.png
+apps/client/public/sprites/grass.png
+apps/client/public/sprites/house.png
+apps/client/public/sprites/hut.png
+apps/client/public/sprites/old/barracks.png
+apps/client/public/sprites/old/forge.png
+apps/client/public/sprites/old/gold.png
+apps/client/public/sprites/old/grass.png
+apps/client/public/sprites/old/grass2.png
+apps/client/public/sprites/old/grass3.png
+apps/client/public/sprites/old/grasspix.png
+apps/client/public/sprites/old/house.png
+apps/client/public/sprites/old/stone.png
+apps/client/public/sprites/old/stone2.png
+apps/client/public/sprites/old/tree.png
+apps/client/public/sprites/quarry.png
+apps/client/public/sprites/stone.png
+apps/client/public/sprites/tc.png
+apps/client/public/sprites/tower.png
+apps/client/public/sprites/tree.png
+apps/client/src/game/scenes/GameScene.ts
+apps/client/src/game/scenes/MenuScene.ts
+apps/client/src/game/utils/PerformanceManager.ts
+apps/server/src/default.map
+apps/server/src/index.ts
+apps/server/src/rooms/GameRoom.ts
+packages/shared/src/balance.ts

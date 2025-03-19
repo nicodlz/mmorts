@@ -59,7 +59,7 @@ export class GameScene extends Phaser.Scene {
   private mapLines: string[] = [];
   private tileSize: number = TILE_SIZE;
   private loadedTiles: Set<string> = new Set(); // Garder trace des tuiles déjà chargées
-  private renderDistance: number = 3; // Distance en chunks (augmentée de 2 à 3)
+  private renderDistance: number = 4; // Distance en chunks (augmentée de 3 à 4)
   private loadedChunks: Set<string> = new Set(); // Garder trace des chunks chargés
   
   // Mode de jeu

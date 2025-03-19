@@ -12,12 +12,12 @@ import {
   GameState as GameStateSchema
 } from "../schemas/GameState";
 
-import { 
-  BUILDING_COSTS, 
+import {
+  BUILDING_COSTS,
   BuildingType, 
   PRODUCTION_RATES, 
   PRODUCTION_RECIPES, 
-  RESOURCE_AMOUNTS, 
+  RESOURCE_AMOUNTS,
   RESOURCE_RESPAWN_TIMES,
   PERFORMANCE,
   UNIT_COSTS,
@@ -27,6 +27,49 @@ import {
   HARVEST_AMOUNT,
   UnitState
 } from "shared";
+
+// Interfaces pour les données envoyées au client
+interface PlayerClientInfo {
+  id: string;
+  name: string;
+  x: number;
+  y: number;
+  hue: number;
+}
+
+interface UnitClientInfo {
+  id: string;
+  type: string;
+  owner: string;
+  x: number;
+  y: number;
+  health: number;
+  maxHealth: number;
+}
+
+interface BuildingClientInfo {
+  id: string;
+  type: string;
+  owner: string;
+  x: number;
+  y: number;
+  health: number;
+  maxHealth: number;
+  productionProgress: number;
+  productionActive: boolean;
+}
+
+interface ResourceClientInfo {
+  id: string;
+  type: string;
+  x: number;
+  y: number;
+  amount: number;
+}
+
+interface RequiredResources {
+  [key: string]: number;
+}
 
 // Schéma principal du jeu
 class GameState extends Schema {
@@ -43,7 +86,7 @@ class GameState extends Schema {
   resources = new MapSchema<ResourceSchema>();
 }
 
-export class GameRoom extends Room<GameState> {
+export class GameRoom extends Room<GameStateSchema> {
   private readonly SIMULATION_INTERVAL = PERFORMANCE.SIMULATION_INTERVAL;
   private mapLines: string[] = [];
   private resourcesByChunk: Map<string, Set<string>> = new Map(); // Ressources par chunk
@@ -64,7 +107,7 @@ export class GameRoom extends Room<GameState> {
 
   // Nouvelles propriétés pour les Interest Areas
   private playerVisibleChunks: Map<string, Set<string>> = new Map(); // Chunks visibles par joueur
-  private readonly INTEREST_AREA_RADIUS = 1; // Rayon en chunks pour définir la zone d'intérêt (3×3 chunks)
+  private readonly INTEREST_AREA_RADIUS = 2; // Rayon en chunks pour définir la zone d'intérêt (5×5 chunks)
   private readonly INTEREST_UPDATE_INTERVAL = 500; // Intervalle de mise à jour des zones d'intérêt en ms
   private lastInterestUpdate: number = 0; // Timestamp de la dernière mise à jour des zones d'intérêt
   private entityPositions: Map<string, {type: string, x: number, y: number}> = new Map(); // Position de toutes les entités
@@ -74,9 +117,144 @@ export class GameRoom extends Room<GameState> {
   private lastVillagerAIUpdate: number = 0;
   private lastVillagerStatLog: number = 0;
 
+  // Variables privées pour les groupes de chunks
+  private chunkGroups: Map<string, Set<string>> = new Map(); // Map<chunkKey, Set<clientId>>
+
+  // Cache pour stocker le dernier état connu des entités par client
+  private lastKnownEntityStates: Map<string, Map<string, any>> = new Map();
+
+  // Constantes pour la compression des propriétés
+  private readonly PROPERTY_MAP = {
+    x: 1,           // Position X
+    y: 2,           // Position Y
+    health: 3,      // Santé
+    maxHealth: 4,   // Santé maximale
+    owner: 5,       // Propriétaire
+    type: 6,        // Type
+    resources: 7,   // Ressources
+    name: 8,        // Nom
+    hue: 9,         // Teinte
+    productionProgress: 10, // Progression de production
+    productionActive: 11    // Production active
+  };
+
+  // Compresser les changements pour économiser de la bande passante
+  private compressChanges(changes: any[]): any[] {
+    return changes.map(change => {
+      const fieldId = this.PROPERTY_MAP[change.field || change.f];
+      
+      // Si la propriété a un ID court, l'utiliser
+      if (fieldId !== undefined) {
+        return {
+          i: fieldId,        // 'i' pour 'id' au lieu de 'field'/'f'
+          v: change.value || change.v  // 'v' est déjà court
+        };
+      }
+      
+      // Sinon garder le format compact standard
+      return {
+        f: change.field || change.f,
+        v: change.value || change.v
+      };
+    });
+  }
+  
+  // Envoyer des mises à jour d'entités optimisées avec delta encoding et compression maximale
+  private sendSuperOptimizedEntityUpdate(entityType: 'player' | 'unit' | 'building', entityId: string, changes: any) {
+    // Récupérer l'entité
+    let entity: { x: number, y: number, owner?: string } | undefined;
+    
+    if (entityType === 'player') {
+      entity = this.state.players.get(entityId);
+    } else if (entityType === 'unit') {
+      entity = this.state.units.get(entityId);
+    } else if (entityType === 'building') {
+      entity = this.state.buildings.get(entityId);
+    }
+    
+    if (!entity) return;
+    
+    // Déterminer les chunks concernés par cette entité
+    const affectedChunks = this.getChunksAroundPosition(entity.x, entity.y);
+    
+    // Pour chaque client concerné
+    for (const client of this.clients) {
+      // Le propriétaire reçoit toujours les mises à jour de ses entités
+      const isOwner = entity.owner === client.sessionId || (entityType === 'player' && entityId === client.sessionId);
+      
+      // Vérifier si le client voit l'entité
+      if (isOwner || this.isEntityInClientView(client.sessionId, entityType, entityId)) {
+        // Créer ou récupérer le cache pour ce client
+        if (!this.lastKnownEntityStates.has(client.sessionId)) {
+          this.lastKnownEntityStates.set(client.sessionId, new Map());
+        }
+        const clientCache = this.lastKnownEntityStates.get(client.sessionId)!;
+        
+        // Récupérer le cache spécifique à cette entité
+        const entityCacheKey = `${entityType}:${entityId}`;
+        const previousState = clientCache.get(entityCacheKey) || {};
+        
+        // Filtrer les modifications pour ne garder que ce qui a changé par rapport à l'état précédent
+        const significantChanges = Array.isArray(changes) 
+          ? changes.filter(change => {
+              const field = change.field || change.f;
+              const value = change.value || change.v;
+              const hasChanged = !previousState[field] || previousState[field] !== value;
+              
+              // Mise à jour de l'état précédent avec la nouvelle valeur
+              if (hasChanged) {
+                previousState[field] = value;
+              }
+              
+              return hasChanged;
+            })
+          : [changes].filter(change => {
+              const field = change.field || change.f;
+              const value = change.value || change.v;
+              const hasChanged = !previousState[field] || previousState[field] !== value;
+              
+              // Mise à jour de l'état précédent avec la nouvelle valeur
+              if (hasChanged) {
+                previousState[field] = value;
+              }
+              
+              return hasChanged;
+            });
+        
+        // Stocker le nouvel état
+        clientCache.set(entityCacheKey, previousState);
+        
+        // N'envoyer que s'il y a des changements significatifs
+        if (significantChanges.length > 0) {
+          // Compresser davantage en utilisant des IDs courts pour les propriétés courantes
+          const compressedChanges = this.compressChanges(significantChanges);
+          
+          // Format de message ultra-compact:
+          // t: type (1=player, 2=unit, 3=building)
+          // i: id
+          // c: changes
+          const typeCode = entityType === 'player' ? 1 : (entityType === 'unit' ? 2 : 3);
+          const message = {
+            t: typeCode,
+            i: entityId,
+            c: compressedChanges
+          };
+          
+          client.send("e", message); // 'e' pour 'entity update', très court
+          
+          // Log pour débogage et analyse des performances
+          if (Math.random() < 0.001) { // Échantillonnage à 0.1% pour éviter trop de logs
+            const compressionRatio = JSON.stringify(significantChanges).length / JSON.stringify(compressedChanges).length;
+            console.log(`[Compression] Client ${client.sessionId}: Ratio ${compressionRatio.toFixed(2)}x pour ${entityType} ${entityId}`);
+          }
+        }
+      }
+    }
+  }
+
   onCreate(options: { worldData: { mapLines: string[], resources: Map<string, ResourceSchema>, resourcesByChunk: Map<string, Set<string>> } }) {
     // Initialiser l'état du jeu
-    this.setState(new GameState());
+    this.setState(new GameStateSchema());
     
     console.log("GameRoom créée");
     
@@ -766,134 +944,146 @@ export class GameRoom extends Room<GameState> {
     
     // Parcourir tous les joueurs
     this.state.players.forEach((player, sessionId) => {
-      // Initialiser les données de mise à jour si nécessaires
-      if (!this.playerUpdateRates.has(sessionId)) {
-        this.playerUpdateRates.set(sessionId, {
-          lastFullUpdate: 0,
-          lastPositionUpdate: 0
-        });
-      }
-      
-      const updateData = this.playerUpdateRates.get(sessionId)!;
-      const client = this.clients.find(c => c.sessionId === sessionId);
-      
-      if (!client) return;
-      
-      // Récupérer les chunks visibles par ce joueur
-      const visibleChunks = this.playerVisibleChunks.get(sessionId) || new Set<string>();
-      
-      // Mettre à jour les positions des joueurs visibles
-      if (now - updateData.lastPositionUpdate > this.NEARBY_UPDATE_RATE) {
-        const playerUpdates = [];
-        
-        // Collecter les joueurs visibles dans les chunks d'intérêt
-        visibleChunks.forEach(chunkKey => {
-          const chunk = this.entitiesByChunk.get(chunkKey);
-          if (chunk) {
-            chunk.players.forEach(otherPlayerId => {
-              if (otherPlayerId !== sessionId) { // Ne pas inclure le joueur lui-même
-                const otherPlayer = this.state.players.get(otherPlayerId);
-                if (otherPlayer) {
-                  playerUpdates.push({
-                    sessionId: otherPlayerId,
-                    x: otherPlayer.x,
-                    y: otherPlayer.y
-                  });
-                }
-              }
-            });
-          }
-        });
-        
-        // Envoyer les mises à jour des positions des joueurs
-        if (playerUpdates.length > 0) {
-          client.send("playerPositions", { players: playerUpdates });
+      try {
+        // Initialiser les données de mise à jour si nécessaires
+        if (!this.playerUpdateRates.has(sessionId)) {
+          this.playerUpdateRates.set(sessionId, {
+            lastFullUpdate: 0,
+            lastPositionUpdate: 0
+          });
         }
         
-        updateData.lastPositionUpdate = now;
-      }
-      
-      // Mise à jour des unités - avec fréquence augmentée
-      if (now - updateData.lastFullUpdate > 100) {
-        // Collecter toutes les unités visibles par ce joueur
-        const visibleUnits = [];
+        const updateData = this.playerUpdateRates.get(sessionId)!;
+        const client = this.clients.find(c => c.sessionId === sessionId);
         
-        // Les unités du joueur sont toujours visibles
-        const playerOwnedUnits = Array.from(this.state.units.values())
-          .filter(unit => unit.owner === sessionId);
+        if (!client) return;
         
-        // Ajouter les unités dans les chunks visibles
-        visibleChunks.forEach(chunkKey => {
-          const chunk = this.entitiesByChunk.get(chunkKey);
-          if (chunk) {
-            chunk.units.forEach(unitId => {
-              const unit = this.state.units.get(unitId);
-              if (unit && unit.owner !== sessionId) { // Ne pas dupliquer les unités du joueur
-                visibleUnits.push(unit);
-              }
-            });
-          }
-        });
+        // Récupérer les chunks visibles par ce joueur
+        const visibleChunks = this.playerVisibleChunks.get(sessionId) || new Set<string>();
         
-        // Combiner les unités propres au joueur et les unités visibles
-        const allVisibleUnits = [...playerOwnedUnits, ...visibleUnits];
-        
-        // Envoyer les mises à jour des unités au client
-        if (allVisibleUnits.length > 0) {
-          const unitUpdates = allVisibleUnits.map(unit => ({
-            id: unit.id,
-            x: unit.x,
-            y: unit.y,
-            owner: unit.owner,
-            type: unit.type,
-            health: unit.health,
-            maxHealth: unit.maxHealth
-          }));
+        // Mettre à jour les positions des joueurs visibles
+        if (now - updateData.lastPositionUpdate > this.NEARBY_UPDATE_RATE) {
+          const playerUpdates: Array<{sessionId: string, x: number, y: number}> = [];
           
-          client.send("unitPositions", {
-            units: unitUpdates
+          // Collecter les joueurs visibles dans les chunks d'intérêt
+          visibleChunks.forEach(chunkKey => {
+            const chunk = this.entitiesByChunk.get(chunkKey);
+            if (chunk) {
+              chunk.players.forEach(otherPlayerId => {
+                if (otherPlayerId !== sessionId) { // Ne pas inclure le joueur lui-même
+                  const otherPlayer = this.state.players.get(otherPlayerId);
+                  if (otherPlayer) {
+                    playerUpdates.push({
+                      sessionId: otherPlayerId,
+                      x: otherPlayer.x,
+                      y: otherPlayer.y
+                    });
+                  }
+                }
+              });
+            }
           });
           
-          // Réduire la verbosité du log en n'affichant pas à chaque envoi
-          if (Math.random() < 0.1) { // Log seulement 10% des envois
-            console.log(`Envoi de ${unitUpdates.length} positions d'unités à ${sessionId}`);
+          // Envoyer les mises à jour des positions des joueurs
+          if (playerUpdates.length > 0) {
+            try {
+              client.send("playerPositions", { players: playerUpdates });
+            } catch (error) {
+              console.error(`Erreur lors de l'envoi des positions de joueurs à ${sessionId}:`, error);
+            }
           }
+          
+          updateData.lastPositionUpdate = now;
         }
         
-        // Mettre à jour les bâtiments visibles
-        const visibleBuildings = [];
-        
-        // Ajouter les bâtiments dans les chunks visibles
-        visibleChunks.forEach(chunkKey => {
-          const chunk = this.entitiesByChunk.get(chunkKey);
-          if (chunk) {
-            chunk.buildings.forEach(buildingId => {
-              const building = this.state.buildings.get(buildingId);
-              if (building) {
-                visibleBuildings.push({
-                  id: building.id,
-                  type: building.type,
-                  owner: building.owner,
-                  x: building.x,
-                  y: building.y,
-                  health: building.health,
-                  maxHealth: building.maxHealth,
-                  productionProgress: building.productionProgress,
-                  productionActive: building.productionActive
+        // Mise à jour des unités - avec fréquence augmentée
+        if (now - updateData.lastFullUpdate > 100) {
+          try {
+            // Collecter toutes les unités visibles par ce joueur
+            const visibleUnits: UnitSchema[] = [];
+            
+            // Les unités du joueur sont toujours visibles
+            const playerOwnedUnits = Array.from(this.state.units.values())
+              .filter(unit => unit.owner === sessionId);
+            
+            // Ajouter les unités dans les chunks visibles
+            visibleChunks.forEach(chunkKey => {
+              const chunk = this.entitiesByChunk.get(chunkKey);
+              if (chunk) {
+                chunk.units.forEach(unitId => {
+                  const unit = this.state.units.get(unitId);
+                  if (unit && unit.owner !== sessionId) { // Ne pas dupliquer les unités du joueur
+                    visibleUnits.push(unit);
+                  }
                 });
               }
             });
+            
+            // Combiner les unités propres au joueur et les unités visibles
+            const allVisibleUnits = [...playerOwnedUnits, ...visibleUnits];
+            
+            // Envoyer les mises à jour des unités au client
+            if (allVisibleUnits.length > 0) {
+              const unitUpdates: UnitClientInfo[] = allVisibleUnits.map(unit => ({
+                id: unit.id,
+                x: unit.x,
+                y: unit.y,
+                owner: unit.owner,
+                type: unit.type,
+                health: unit.health,
+                maxHealth: unit.maxHealth
+              }));
+              
+              client.send("unitPositions", {
+                units: unitUpdates
+              });
+              
+              // Réduire la verbosité du log en n'affichant pas à chaque envoi
+              if (Math.random() < 0.1) { // Log seulement 10% des envois
+                console.log(`Envoi de ${unitUpdates.length} positions d'unités à ${sessionId}`);
+              }
+            }
+            
+            // Mettre à jour les bâtiments visibles
+            const visibleBuildings: BuildingClientInfo[] = [];
+            
+            // Ajouter les bâtiments dans les chunks visibles
+            visibleChunks.forEach(chunkKey => {
+              const chunk = this.entitiesByChunk.get(chunkKey);
+              if (chunk) {
+                chunk.buildings.forEach(buildingId => {
+                  const building = this.state.buildings.get(buildingId);
+                  if (building) {
+                    visibleBuildings.push({
+                      id: building.id,
+                      type: building.type,
+                      owner: building.owner,
+                      x: building.x,
+                      y: building.y,
+                      health: building.health,
+                      maxHealth: building.maxHealth,
+                      productionProgress: building.productionProgress,
+                      productionActive: building.productionActive
+                    });
+                  }
+                });
+              }
+            });
+            
+            // Envoyer les mises à jour des bâtiments
+            if (visibleBuildings.length > 0) {
+              client.send("buildingUpdates", {
+                buildings: visibleBuildings
+              });
+            }
+          } catch (error) {
+            console.error(`Erreur lors de l'envoi des mises à jour à ${sessionId}:`, error);
           }
-        });
-        
-        // Envoyer les mises à jour des bâtiments
-        if (visibleBuildings.length > 0) {
-          client.send("buildingUpdates", {
-            buildings: visibleBuildings
-          });
+          
+          updateData.lastFullUpdate = now;
         }
-        
-        updateData.lastFullUpdate = now;
+      } catch (error) {
+        console.error(`Erreur globale dans optimizeBroadcasts pour ${sessionId}:`, error);
       }
     });
   }
@@ -965,21 +1155,50 @@ export class GameRoom extends Room<GameState> {
 
   // Nouvelle méthode pour obtenir les ressources dans un rayon de chunks
   private getResourcesInRange(centerX: number, centerY: number, range: number = 2): Set<string> {
-    const centerChunkX = Math.floor(centerX / (TILE_SIZE * CHUNK_SIZE));
-    const centerChunkY = Math.floor(centerY / (TILE_SIZE * CHUNK_SIZE));
-    const resources = new Set<string>();
+    // Rediriger vers l'implémentation optimisée
+    return this.getResourcesInRangeV2(centerX, centerY, range);
+  }
 
-    for (let dy = -range; dy <= range; dy++) {
-      for (let dx = -range; dx <= range; dx++) {
-        const chunkKey = `${centerChunkX + dx},${centerChunkY + dy}`;
-        const chunkResources = this.resourcesByChunk.get(chunkKey);
-        if (chunkResources) {
-          chunkResources.forEach(resourceId => resources.add(resourceId));
+  // Nouvelle méthode pour obtenir les ressources dans un rayon de chunks
+  private getResourcesInRangeV2(x: number, y: number, radius: number = 2): Set<string> {
+    const resourcesInRange = new Set<string>();
+    
+    // Calculer les limites de la zone de recherche en termes de chunks
+    const tileRadius = radius * TILE_SIZE;
+    const minChunkX = Math.floor((x - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    const maxChunkX = Math.floor((x + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    const minChunkY = Math.floor((y - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    const maxChunkY = Math.floor((y + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
+    
+    // Parcourir tous les chunks dans la zone
+    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+      for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY++) {
+        const chunkKey = `${chunkX},${chunkY}`;
+        
+        // Si ce chunk contient des ressources, les ajouter à notre ensemble
+        if (this.resourcesByChunk.has(chunkKey)) {
+          const chunkResources = this.resourcesByChunk.get(chunkKey);
+          
+          if (chunkResources) {
+            // Pour chaque ressource dans ce chunk, vérifier si elle est dans le rayon
+            for (const resourceId of chunkResources) {
+              const resource = this.resources.get(resourceId);
+              
+              if (resource) {
+                const distance = this.getDistance(x, y, resource.x, resource.y);
+                
+                // Si la ressource est dans le rayon, l'ajouter à notre ensemble
+                if (distance <= tileRadius) {
+                  resourcesInRange.add(resourceId);
+                }
+              }
+            }
+          }
         }
       }
     }
-
-    return resources;
+    
+    return resourcesInRange;
   }
 
   // Gestion de la récolte de ressources
@@ -1708,9 +1927,7 @@ export class GameRoom extends Room<GameState> {
 
   // Méthode utilitaire pour calculer la distance entre deux points
   private getDistance(x1: number, y1: number, x2: number, y2: number): number {
-    const dx = x2 - x1;
-    const dy = y2 - y1;
-    return Math.sqrt(dx * dx + dy * dy);
+    return Math.sqrt(Math.pow(x2 - x1, 2) + Math.pow(y2 - y1, 2));
   }
 
   // Méthode pour gérer la destruction d'un bâtiment
@@ -2702,7 +2919,7 @@ export class GameRoom extends Room<GameState> {
     // Déterminer les chunks qui ne sont plus visibles (sortie de la zone d'intérêt)
     const removedChunks = [...previousChunks].filter(chunk => !visibleChunks.has(chunk));
     
-    // Si des changements ont eu lieu, envoyer les mises à jour au client
+    // Si des changements ont eu lieu, mettre à jour les abonnements aux groupes
     if (newChunks.length > 0 || removedChunks.length > 0) {
       console.log(`Zone d'intérêt mise à jour pour ${playerId}: ${visibleChunks.size} chunks (${newChunks.length} ajoutés, ${removedChunks.length} supprimés)`);
       if (newChunks.length > 0) console.log(`Nouveaux chunks: [${newChunks.join(', ')}]`);
@@ -2710,26 +2927,49 @@ export class GameRoom extends Room<GameState> {
       
       const client = this.clients.find(c => c.sessionId === playerId);
       if (client) {
-        // Notifier les nouveaux chunks visibles
-        if (newChunks.length > 0) {
-          // Collecter les ressources des nouveaux chunks
-          const newResources = this.getResourcesFromChunks(newChunks);
+        try {
+          // Mettre à jour les abonnements aux groupes de chunks
+          this.updateClientChunkGroups(client, previousChunks, visibleChunks);
           
-          // Collecter les entités des nouveaux chunks
-          const newEntities = this.getEntitiesFromChunks(newChunks);
-          
-          // Envoyer les nouvelles entités visibles
+          // Notifier les nouveaux chunks visibles
+          if (newChunks.length > 0) {
+            // Collecter les ressources des nouveaux chunks
+            const newResources = this.getResourcesFromChunks(newChunks);
+            
+            // Collecter les entités des nouveaux chunks
+            const newEntities = this.getEntitiesFromChunks(newChunks);
+            
+            // Créer un objet de mise à jour entièrement sérialisable
+            const updateData = {
+              added: newChunks,
+              removed: removedChunks,
+              resources: newResources,
+              entities: {
+                players: newEntities.players,
+                units: newEntities.units,
+                buildings: newEntities.buildings
+              }
+            };
+            
+            // Envoyer les nouvelles entités visibles
+            client.send("visibleChunksUpdated", updateData);
+          } else {
+            // Juste notifier les chunks qui ne sont plus visibles
+            client.send("visibleChunksUpdated", {
+              added: [],
+              removed: removedChunks,
+              resources: [],
+              entities: { players: [], units: [], buildings: [] }
+            });
+          }
+        } catch (error) {
+          console.error(`Erreur lors de l'envoi des mises à jour de chunks à ${playerId}:`, error);
+          // En cas d'erreur, envoyer une mise à jour minimale sans données complexes
           client.send("visibleChunksUpdated", {
             added: newChunks,
             removed: removedChunks,
-            resources: newResources,
-            entities: newEntities
-          });
-        } else {
-          // Juste notifier les chunks qui ne sont plus visibles
-          client.send("visibleChunksUpdated", {
-            added: [],
-            removed: removedChunks
+            resources: [],
+            entities: { players: [], units: [], buildings: [] }
           });
         }
       }
@@ -2738,12 +2978,337 @@ export class GameRoom extends Room<GameState> {
     // Mettre à jour les chunks visibles pour ce joueur
     this.playerVisibleChunks.set(playerId, visibleChunks);
   }
+  
+  // Nouvelle méthode pour gérer les abonnements aux groupes de chunks
+  private updateClientChunkGroups(client: Client, oldChunks: Set<string>, newChunks: Set<string>) {
+    // Quitter les groupes des chunks qui ne sont plus visibles
+    for (const chunkKey of oldChunks) {
+      if (!newChunks.has(chunkKey)) {
+        // Revenir à notre implémentation manuelle de gestion des groupes
+        this.leaveChunkGroup(chunkKey, client.sessionId);
+      }
+    }
+    
+    // Rejoindre les groupes des nouveaux chunks visibles
+    for (const chunkKey of newChunks) {
+      if (!oldChunks.has(chunkKey)) {
+        // Revenir à notre implémentation manuelle de gestion des groupes
+        this.joinChunkGroup(chunkKey, client.sessionId);
+      }
+    }
+  }
+  
+  // Méthode pour ajouter un client à un groupe de chunks
+  private joinChunkGroup(chunkKey: string, clientId: string) {
+    // Créer le groupe s'il n'existe pas
+    if (!this.chunkGroups.has(chunkKey)) {
+      this.chunkGroups.set(chunkKey, new Set<string>());
+    }
+    
+    // Ajouter le client au groupe
+    const group = this.chunkGroups.get(chunkKey)!;
+    group.add(clientId);
+  }
+  
+  // Méthode pour retirer un client d'un groupe de chunks
+  private leaveChunkGroup(chunkKey: string, clientId: string) {
+    // Vérifier si le groupe existe
+    if (!this.chunkGroups.has(chunkKey)) return;
+    
+    // Retirer le client du groupe
+    const group = this.chunkGroups.get(chunkKey)!;
+    group.delete(clientId);
+    
+    // Supprimer le groupe s'il est vide
+    if (group.size === 0) {
+      this.chunkGroups.delete(chunkKey);
+    }
+  }
+  
+  // Méthode pour diffuser un message uniquement aux clients dans des chunks spécifiques
+  private broadcastToChunks(message: string, data: any, chunkKeys: string[]) {
+    // Créer un ensemble de clients uniques à partir des groupes de chunks
+    const targetClientIds = new Set<string>();
+    
+    for (const chunkKey of chunkKeys) {
+      const group = this.chunkGroups.get(chunkKey);
+      if (group) {
+        for (const clientId of group) {
+          targetClientIds.add(clientId);
+        }
+      }
+    }
+    
+    // Diffuser le message uniquement aux clients cibles
+    for (const client of this.clients) {
+      if (targetClientIds.has(client.sessionId)) {
+        client.send(message, data);
+      }
+    }
+  }
+
+  // Configurer le filtrage des entités basé sur les zones d'intérêt
+  private setupEntityFiltering() {
+    console.log("Configuration du filtrage des entités basé sur les zones d'intérêt...");
+    
+    // Dans Colyseus 0.14, nous configurons le filtrage au niveau du schéma
+    // en utilisant les événements onAdd et onChange
+    this.state.players.onAdd = (player, sessionId) => {
+      console.log(`Joueur ajouté à l'état: ${sessionId}`);
+      
+      // Déterminer dans quel chunk se trouve ce joueur
+      const playerChunkX = Math.floor(player.x / (TILE_SIZE * CHUNK_SIZE));
+      const playerChunkY = Math.floor(player.y / (TILE_SIZE * CHUNK_SIZE));
+      const playerChunkKey = `${playerChunkX},${playerChunkY}`;
+      
+      // Notifier tous les clients qui voient ce chunk
+      const initialChunks = this.getChunksAroundPosition(player.x, player.y);
+      
+      // Rejoindre les groupes de chunks - implémentation manuelle
+      const client = this.clients.find(c => c.sessionId === sessionId);
+      if (client) {
+        for (const chunkKey of initialChunks) {
+          this.joinChunkGroup(chunkKey, sessionId);
+        }
+      }
+      
+      // Envoyer l'ajout initial à tous les clients concernés
+      const playerData = {
+        id: sessionId,
+        name: player.name,
+        x: player.x,
+        y: player.y,
+        hue: player.hue
+      };
+      
+      this.broadcastToChunks("playerAdded", playerData, initialChunks);
+      
+      player.onChange = (changes) => {
+        // Envoyer les mises à jour de façon optimisée
+        this.sendOptimizedEntityUpdate('player', sessionId, changes);
+      };
+    };
+    
+    this.state.units.onAdd = (unit, unitId) => {
+      console.log(`Unité ajoutée à l'état: ${unitId}`);
+      
+      // Déterminer dans quel chunk se trouve cette unité
+      const unitChunks = this.getChunksAroundPosition(unit.x, unit.y);
+      
+      // Envoyer l'ajout initial à tous les clients concernés
+      const unitData = {
+        id: unitId,
+        type: unit.type,
+        owner: unit.owner,
+        x: unit.x,
+        y: unit.y,
+        health: unit.health,
+        maxHealth: unit.maxHealth
+      };
+      
+      this.broadcastToChunks("unitAdded", unitData, unitChunks);
+      
+      unit.onChange = (changes) => {
+        // Envoyer les mises à jour de façon optimisée
+        this.sendOptimizedEntityUpdate('unit', unitId, changes);
+      };
+    };
+    
+    this.state.buildings.onAdd = (building, buildingId) => {
+      console.log(`Bâtiment ajouté à l'état: ${buildingId}`);
+      
+      // Déterminer dans quel chunk se trouve ce bâtiment
+      const buildingChunks = this.getChunksAroundPosition(building.x, building.y);
+      
+      // Envoyer l'ajout initial à tous les clients concernés
+      const buildingData = {
+        id: buildingId,
+        type: building.type,
+        owner: building.owner,
+        x: building.x,
+        y: building.y,
+        health: building.health,
+        maxHealth: building.maxHealth,
+        productionProgress: building.productionProgress,
+        productionActive: building.productionActive
+      };
+      
+      this.broadcastToChunks("buildingAdded", buildingData, buildingChunks);
+      
+      building.onChange = (changes) => {
+        // Envoyer les mises à jour de façon optimisée
+        this.sendOptimizedEntityUpdate('building', buildingId, changes);
+      };
+    };
+    
+    console.log("Filtrage des entités configuré avec succès.");
+  }
+  
+  // Vérifier si une entité est dans la vue d'un client
+  private isEntityInClientView(clientId: string, entityType: 'player' | 'unit' | 'building', entityId: string): boolean {
+    // Récupérer les chunks visibles par le client
+    const visibleChunks = this.playerVisibleChunks.get(clientId);
+    if (!visibleChunks) return false;
+    
+    // Récupérer l'entité en fonction de son type
+    let entity: { x: number, y: number } | undefined;
+    
+    if (entityType === 'player') {
+      entity = this.state.players.get(entityId);
+    } else if (entityType === 'unit') {
+      entity = this.state.units.get(entityId);
+    } else if (entityType === 'building') {
+      entity = this.state.buildings.get(entityId);
+    }
+    
+    if (!entity) return false;
+    
+    // Calculer dans quel chunk se trouve l'entité
+    const entityChunkX = Math.floor(entity.x / (TILE_SIZE * CHUNK_SIZE));
+    const entityChunkY = Math.floor(entity.y / (TILE_SIZE * CHUNK_SIZE));
+    const entityChunkKey = `${entityChunkX},${entityChunkY}`;
+    
+    // Vérifier si le chunk de l'entité est visible par le client
+    return visibleChunks.has(entityChunkKey);
+  }
+  
+  // Méthode pour calculer les chunks influencés par une position
+  private getChunksAroundPosition(x: number, y: number, radius: number = 1): string[] {
+    const centerChunkX = Math.floor(x / (TILE_SIZE * CHUNK_SIZE));
+    const centerChunkY = Math.floor(y / (TILE_SIZE * CHUNK_SIZE));
+    const chunks: string[] = [];
+    
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        chunks.push(`${centerChunkX + dx},${centerChunkY + dy}`);
+      }
+    }
+    
+    return chunks;
+  }
+  
+  // Envoyer des mises à jour d'entités optimisées avec delta encoding
+  private sendOptimizedEntityUpdate(entityType: 'player' | 'unit' | 'building', entityId: string, changes: any) {
+    // Récupérer l'entité
+    let entity: { x: number, y: number, owner?: string } | undefined;
+    
+    if (entityType === 'player') {
+      entity = this.state.players.get(entityId);
+    } else if (entityType === 'unit') {
+      entity = this.state.units.get(entityId);
+    } else if (entityType === 'building') {
+      entity = this.state.buildings.get(entityId);
+    }
+    
+    if (!entity) return;
+    
+    // Déterminer les chunks concernés par cette entité
+    const affectedChunks = this.getChunksAroundPosition(entity.x, entity.y);
+    
+    // Pour chaque client concerné
+    for (const client of this.clients) {
+      // Le propriétaire reçoit toujours les mises à jour de ses entités
+      const isOwner = entity.owner === client.sessionId || (entityType === 'player' && entityId === client.sessionId);
+      
+      // Vérifier si le client voit l'entité
+      if (isOwner || this.isEntityInClientView(client.sessionId, entityType, entityId)) {
+        // Créer ou récupérer le cache pour ce client
+        if (!this.lastKnownEntityStates.has(client.sessionId)) {
+          this.lastKnownEntityStates.set(client.sessionId, new Map());
+        }
+        const clientCache = this.lastKnownEntityStates.get(client.sessionId)!;
+        
+        // Récupérer le cache spécifique à cette entité
+        const entityCacheKey = `${entityType}:${entityId}`;
+        const previousState = clientCache.get(entityCacheKey) || {};
+        
+        // Filtrer les modifications pour ne garder que ce qui a changé par rapport à l'état précédent
+        const significantChanges = Array.isArray(changes) 
+          ? changes.filter(change => {
+              const field = change.field;
+              const value = change.value;
+              const hasChanged = !previousState[field] || previousState[field] !== value;
+              
+              // Mise à jour de l'état précédent avec la nouvelle valeur
+              if (hasChanged) {
+                previousState[field] = value;
+              }
+              
+              return hasChanged;
+            })
+          : [changes].filter(change => {
+              const field = change.field;
+              const value = change.value;
+              const hasChanged = !previousState[field] || previousState[field] !== value;
+              
+              // Mise à jour de l'état précédent avec la nouvelle valeur
+              if (hasChanged) {
+                previousState[field] = value;
+              }
+              
+              return hasChanged;
+            });
+        
+        // Stocker le nouvel état
+        clientCache.set(entityCacheKey, previousState);
+        
+        // N'envoyer que s'il y a des changements significatifs
+        if (significantChanges.length > 0) {
+          client.send(`${entityType}Update`, {
+            id: entityId,
+            changes: significantChanges
+          });
+        }
+      }
+    }
+  }
+
+  // Méthode pour obtenir toutes les ressources dans un rayon donné
+  private getResourcesInRange(x: number, y: number, radius: number = 2): Set<string> {
+    // Rediriger vers la nouvelle implémentation optimisée
+    return this.getResourcesInRangeV2(x, y, radius);
+  }
+
+  // Nouvelle méthode pour gérer l'épuisement des ressources de manière centralisée
+  private handleResourceDepletion(resourceId: string) {
+    const resource = this.resources.get(resourceId);
+    if (!resource) return;
+    
+    // Marquer comme épuisée
+    resource.amount = 0;
+    resource.isRespawning = true;
+    
+    // Informer tous les clients
+    this.broadcast("resourceDepleted", {
+      resourceId: resourceId,
+      respawnTime: RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000
+    });
+    
+    // Planifier la réapparition
+    setTimeout(() => {
+      if (this.resources.has(resourceId)) {
+        resource.amount = RESOURCE_AMOUNTS[resource.type as ResourceType] || resource.maxAmount;
+        resource.isRespawning = false;
+        
+        // Informer tous les clients de la réapparition
+        this.broadcast("resourceRespawned", {
+          resourceId: resourceId,
+          amount: resource.amount
+        });
+        
+        console.log(`Ressource ${resourceId} réapparue avec ${resource.amount} unités`);
+      }
+    }, RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000);
+  }
 
   // Récupérer les ressources à partir d'une liste de chunks
-  private getResourcesFromChunks(chunks: string[]): any[] {
-    const resources: any[] = [];
+  private getResourcesFromChunks(chunks: string[]): ResourceClientInfo[] {
+    const resources: ResourceClientInfo[] = [];
     
-    chunks.forEach(chunkKey => {
+    // Si aucun chunk spécifié, retourner un tableau vide
+    if (!chunks || chunks.length === 0) return resources;
+    
+    for (const chunkKey of chunks) {
       const chunkResources = this.resourcesByChunk.get(chunkKey);
       if (chunkResources) {
         chunkResources.forEach(resourceId => {
@@ -2760,20 +3325,27 @@ export class GameRoom extends Room<GameState> {
           }
         });
       }
-    });
+    }
     
     return resources;
   }
 
   // Récupérer les entités à partir d'une liste de chunks
-  private getEntitiesFromChunks(chunks: string[]): any {
+  private getEntitiesFromChunks(chunks: string[]): { 
+    players: PlayerClientInfo[],
+    units: UnitClientInfo[],
+    buildings: BuildingClientInfo[]
+  } {
     const entities = {
-      players: [],
-      units: [],
-      buildings: []
+      players: [] as PlayerClientInfo[],
+      units: [] as UnitClientInfo[],
+      buildings: [] as BuildingClientInfo[]
     };
     
-    chunks.forEach(chunkKey => {
+    // Si aucun chunk spécifié, retourner un objet vide
+    if (!chunks || chunks.length === 0) return entities;
+    
+    for (const chunkKey of chunks) {
       const chunk = this.entitiesByChunk.get(chunkKey);
       if (chunk) {
         // Récupérer les joueurs
@@ -2824,96 +3396,13 @@ export class GameRoom extends Room<GameState> {
           }
         });
       }
-    });
+    }
     
     return entities;
   }
 
-  // Configurer le filtrage des entités basé sur les zones d'intérêt
-  private setupEntityFiltering() {
-    console.log("Configuration du filtrage des entités basé sur les zones d'intérêt...");
-    
-    // Dans Colyseus, nous devons configurer le filtrage au niveau du schéma
-    // en utilisant la méthode onFilterSchema
-    this.state.players.onAdd = (player, sessionId) => {
-      console.log(`Joueur ajouté à l'état: ${sessionId}`);
-      player.onChange = (changes) => {
-        // Notifier uniquement les clients qui sont dans la zone d'intérêt
-        this.clients.forEach(client => {
-          if (client.sessionId === sessionId || this.isEntityInClientView(client.sessionId, 'player', sessionId)) {
-            this.broadcast("playerUpdate", {
-              id: sessionId,
-              changes: changes.map(change => ({
-                field: change.field,
-                value: change.value
-              }))
-            }, { clients: [client] });
-          }
-        });
-      };
-    };
-    
-    this.state.units.onAdd = (unit, unitId) => {
-      console.log(`Unité ajoutée à l'état: ${unitId}`);
-      unit.onChange = (changes) => {
-        // Notifier uniquement les clients qui sont dans la zone d'intérêt
-        // ou qui sont propriétaires de l'unité
-        this.clients.forEach(client => {
-          if (unit.owner === client.sessionId || this.isEntityInClientView(client.sessionId, 'unit', unitId)) {
-            this.broadcast("unitUpdate", {
-              id: unitId,
-              changes: changes.map(change => ({
-                field: change.field,
-                value: change.value
-              }))
-            }, { clients: [client] });
-          }
-        });
-      };
-    };
-    
-    this.state.buildings.onAdd = (building, buildingId) => {
-      console.log(`Bâtiment ajouté à l'état: ${buildingId}`);
-      building.onChange = (changes) => {
-        // Notifier uniquement les clients qui sont dans la zone d'intérêt
-        // ou qui sont propriétaires du bâtiment
-        this.clients.forEach(client => {
-          if (building.owner === client.sessionId || this.isEntityInClientView(client.sessionId, 'building', buildingId)) {
-            this.broadcast("buildingUpdate", {
-              id: buildingId,
-              changes: changes.map(change => ({
-                field: change.field,
-                value: change.value
-              }))
-            }, { clients: [client] });
-          }
-        });
-      };
-    };
-    
-    console.log("Filtrage des entités configuré avec succès.");
-  }
-  
-  // Vérifier si une entité est dans la vue d'un client
-  private isEntityInClientView(clientId: string, entityType: string, entityId: string): boolean {
-    // Récupérer les chunks visibles par le client
-    const visibleChunks = this.playerVisibleChunks.get(clientId) || new Set<string>();
-    
-    // Récupérer la position de l'entité
-    const entityPosition = this.entityPositions.get(entityId);
-    if (!entityPosition) return false;
-    
-    // Calculer le chunk de l'entité
-    const entityChunkX = Math.floor(entityPosition.x / (TILE_SIZE * CHUNK_SIZE));
-    const entityChunkY = Math.floor(entityPosition.y / (TILE_SIZE * CHUNK_SIZE));
-    const entityChunkKey = `${entityChunkX},${entityChunkY}`;
-    
-    // Vérifier si le chunk de l'entité est visible par le client
-    return visibleChunks.has(entityChunkKey);
-  }
-
-  // Méthode pour obtenir toutes les ressources dans un rayon donné
-  private getResourcesInRange(x: number, y: number, radius: number): Set<string> {
+  // Pour compatibilité temporaire - sera supprimé après refactoring complet
+  private getResourcesInRangeV2(x: number, y: number, radius: number = 2): Set<string> {
     const resourcesInRange = new Set<string>();
     
     // Calculer les limites de la zone de recherche en termes de chunks
@@ -2952,37 +3441,5 @@ export class GameRoom extends Room<GameState> {
     }
     
     return resourcesInRange;
-  }
-
-  // Nouvelle méthode pour gérer l'épuisement des ressources de manière centralisée
-  private handleResourceDepletion(resourceId: string) {
-    const resource = this.resources.get(resourceId);
-    if (!resource) return;
-    
-    // Marquer comme épuisée
-    resource.amount = 0;
-    resource.isRespawning = true;
-    
-    // Informer tous les clients
-    this.broadcast("resourceDepleted", {
-      resourceId: resourceId,
-      respawnTime: RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000
-    });
-    
-    // Planifier la réapparition
-    setTimeout(() => {
-      if (this.resources.has(resourceId)) {
-        resource.amount = RESOURCE_AMOUNTS[resource.type as ResourceType] || resource.maxAmount;
-        resource.isRespawning = false;
-        
-        // Informer tous les clients de la réapparition
-        this.broadcast("resourceRespawned", {
-          resourceId: resourceId,
-          amount: resource.amount
-        });
-        
-        console.log(`Ressource ${resourceId} réapparue avec ${resource.amount} unités`);
-      }
-    }, RESOURCE_RESPAWN_TIMES[resource.type as ResourceType] || 60000);
   }
 } 

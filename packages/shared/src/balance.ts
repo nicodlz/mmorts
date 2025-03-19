@@ -48,7 +48,15 @@ export const PLAYER_STARTING_RESOURCES = {
   [ResourceType.IRON]: 100,
   [ResourceType.COAL]: 100,
   [ResourceType.STEEL]: 100
-};
+}; 
+// export const PLAYER_STARTING_RESOURCES = {
+//   [ResourceType.WOOD]: 0,
+//   [ResourceType.STONE]: 0,
+//   [ResourceType.GOLD]: 0,
+//   [ResourceType.IRON]: 0,
+//   [ResourceType.COAL]: 0,
+//   [ResourceType.STEEL]: 0
+// };
 
 // ====== COÛTS DE CONSTRUCTION ======
 

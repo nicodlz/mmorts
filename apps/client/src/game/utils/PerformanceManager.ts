@@ -32,7 +32,7 @@ export class PerformanceManager {
   
   // Paramètres adaptables
   private static _networkUpdateRate: number = 100;
-  private static _renderDistance: number = 3;
+  private static _renderDistance: number = 4;
   private static _renderOptimizationInterval: number = 500;
   private static _cleanupInterval: number = 5000;
   private static _maxTilePoolSize: number = 500;
@@ -163,41 +163,47 @@ export class PerformanceManager {
    * Applique les paramètres correspondant au niveau de qualité actuel
    */
   private static applyQualitySettings() {
-    // Sauvegarder les anciennes valeurs pour détecter les changements
+    // Enregistrer les anciens paramètres pour détecter les changements
     const oldRenderDistance = this._renderDistance;
     
     switch (this._qualityLevel) {
       case QualityLevel.LOW:
-        this._networkUpdateRate = 300;      // 3 fois par seconde (réduit)
-        this._renderDistance = 1;           // Charger seulement les chunks adjacents
-        this._renderOptimizationInterval = 100; // Optimisations très fréquentes
-        this._cleanupInterval = 1000;       // Nettoyage très fréquent
-        this._maxTilePoolSize = 150;        // Réduire encore la taille du pool
-        this._positionThreshold = 2.0;      // Réduire les mises à jour réseau
-        this._lerpFactor = 0.04;            // Interpolation plus lente pour économiser CPU
-        this._effectsQuality = 0.1;         // Effets visuels minimaux
+        console.log("Qualité BASSE appliquée");
+        // Paramètres pour qualité basse
+        this._networkUpdateRate = 150; // Mises à jour moins fréquentes
+        this._renderDistance = 4;     // Garder le renderDistance à 4 même en qualité basse
+        this._renderOptimizationInterval = 250;
+        this._cleanupInterval = 3000;
+        this._maxTilePoolSize = 300;
+        this._positionThreshold = 1.0;
+        this._lerpFactor = 0.05;
+        this._effectsQuality = 0.5;
         break;
         
       case QualityLevel.MEDIUM:
-        this._networkUpdateRate = 150;      // ~6 fois par seconde
-        this._renderDistance = 2;           // Distance moyenne
-        this._renderOptimizationInterval = 350; // Optimisations moyennes
-        this._cleanupInterval = 3000;       // Nettoyage modéré
-        this._maxTilePoolSize = 350;        // Cache modéré
-        this._positionThreshold = 1.0;      // Mises à jour modérées
-        this._lerpFactor = 0.07;            // Interpolation moyenne
-        this._effectsQuality = 0.6;         // Effets modérés
+        console.log("Qualité MOYENNE appliquée");
+        // Paramètres pour qualité moyenne
+        this._networkUpdateRate = 120;
+        this._renderDistance = 4;           // Distance moyenne
+        this._renderOptimizationInterval = 500;
+        this._cleanupInterval = 5000;
+        this._maxTilePoolSize = 500;
+        this._positionThreshold = 0.5;
+        this._lerpFactor = 0.08;
+        this._effectsQuality = 0.75;
         break;
         
       case QualityLevel.HIGH:
-        this._networkUpdateRate = 100;      // 10 fois par seconde
-        this._renderDistance = 3;           // Distance maximale
-        this._renderOptimizationInterval = 500; // Optimisations moins fréquentes
-        this._cleanupInterval = 5000;       // Nettoyage moins fréquent
-        this._maxTilePoolSize = 500;        // Grand cache
-        this._positionThreshold = 0.5;      // Mises à jour fréquentes
-        this._lerpFactor = 0.08;            // Interpolation rapide
-        this._effectsQuality = 1.0;         // Tous les effets
+        console.log("Qualité HAUTE appliquée");
+        // Paramètres pour qualité haute
+        this._networkUpdateRate = 100;
+        this._renderDistance = 4;           // Distance maximale
+        this._renderOptimizationInterval = 750;
+        this._cleanupInterval = 7000;
+        this._maxTilePoolSize = 750;
+        this._positionThreshold = 0.2;
+        this._lerpFactor = 0.12;
+        this._effectsQuality = 1.0;
         break;
     }
     
