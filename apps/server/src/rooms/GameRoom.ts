@@ -125,6 +125,9 @@ export class GameRoom extends Room<GameStateSchema> {
   // Cache pour stocker le dernier état connu des entités par client
   private lastKnownEntityStates: Map<string, Map<string, any>> = new Map();
 
+  // Flag pour activer/désactiver le filtrage natif de Colyseus
+  private useNativeFiltering: boolean = true; // Activé par défaut
+
   // Constantes pour la compression des propriétés
   private readonly PROPERTY_MAP = {
     x: 1,           // Position X
@@ -254,9 +257,27 @@ export class GameRoom extends Room<GameStateSchema> {
     }
   }
 
-  onCreate(options: { worldData: { mapLines: string[], resources: Map<string, ResourceSchema>, resourcesByChunk: Map<string, Set<string>> } }) {
-    // Initialiser l'état du jeu
+  onCreate(options: any) {
+    console.log("Création d'une nouvelle room avec options:", options);
+    
+    // Initialiser l'état global du jeu
     this.setState(new GameStateSchema());
+    
+    // Activer le filtrage spatial natif de Colyseus
+    console.log("✅ Filtrage spatial natif activé pour optimiser les performances réseau");
+    this.useNativeFiltering = true;
+    
+    // Configurer le filtrage spatial des entités
+    this.setupEntityFiltering();
+    
+    // Charger la carte depuis les options ou utiliser la carte par défaut
+    if (options && options.worldData) {
+      console.log("Utilisation des données de monde fournies");
+      this.mapLines = options.worldData.mapLines;
+    } else {
+      console.log("Chargement de la carte par défaut");
+      this.loadMap();
+    }
     
     console.log("GameRoom créée");
     
@@ -266,7 +287,6 @@ export class GameRoom extends Room<GameStateSchema> {
       return;
     }
     
-    this.mapLines = options.worldData.mapLines;
     this.resources = options.worldData.resources;
     this.resourcesByChunk = options.worldData.resourcesByChunk;
     
@@ -426,6 +446,11 @@ export class GameRoom extends Room<GameStateSchema> {
       unit.x = position.x;
       unit.y = position.y;
       
+      // Initialiser les positions cibles avec la position actuelle
+      // pour éviter le déplacement immédiat vers (0,0)
+      unit.targetX = position.x;
+      unit.targetY = position.y;
+      
       // Ajouter l'unité à l'état du jeu
       this.state.units.set(unit.id, unit);
       
@@ -565,6 +590,11 @@ export class GameRoom extends Room<GameStateSchema> {
       unit.x = position.x;
       unit.y = position.y;
       
+      // Initialiser les positions cibles avec la position actuelle
+      // pour éviter le déplacement immédiat vers (0,0)
+      unit.targetX = position.x;
+      unit.targetY = position.y;
+      
       // Ajouter le villageois à l'état du jeu
       this.state.units.set(unit.id, unit);
       
@@ -592,6 +622,78 @@ export class GameRoom extends Room<GameStateSchema> {
       player.isMovingUnits = data.isMoving;
       
       console.log(`Déplacement des unités de ${client.sessionId}: ${data.isMoving ? 'activé' : 'désactivé'} vers (${data.x}, ${data.y})`);
+    });
+    
+    // Activer le filtrage spatial natif s'il est supporté (Colyseus 0.15+)
+    try {
+      // Vérification de version (si disponible dans 0.15+)
+      const colyseusVersion = require("colyseus/package.json").version;
+      const majorVersion = parseInt(colyseusVersion.split('.')[0]);
+      const minorVersion = parseInt(colyseusVersion.split('.')[1]);
+      
+      // Si version 0.15 ou plus, activer le filtrage natif par défaut
+      if (majorVersion > 0 || minorVersion >= 15) {
+        this.useNativeFiltering = true;
+        console.log(`Filtrage spatial natif de Colyseus activé (v${colyseusVersion})`);
+      } else {
+        console.log(`Filtrage spatial natif non supporté (v${colyseusVersion}), utilisation du système personnalisé`);
+      }
+    } catch (e) {
+      console.log("Impossible de déterminer la version de Colyseus, utilisation du système personnalisé");
+    }
+    
+    // Ajout d'une commande admin pour basculer entre les systèmes
+    this.onMessage("admin:toggleFiltering", (client, message) => {
+      // Vérifier si le client est admin (à adapter selon votre système)
+      const isAdmin = client.sessionId === this.clients[0]?.sessionId; // Premier connecté = admin (simple exemple)
+      
+      if (isAdmin) {
+        this.useNativeFiltering = !this.useNativeFiltering;
+        console.log(`Filtrage natif Colyseus: ${this.useNativeFiltering ? "Activé" : "Désactivé"}`);
+        
+        this.broadcast("systemNotice", {
+          message: `Filtrage natif Colyseus: ${this.useNativeFiltering ? "Activé" : "Désactivé"}`
+        });
+      }
+    });
+
+    // Ajouter un gestionnaire pour les demandes manuelles de ressources (debug)
+    this.onMessage("requestResources", (client, data) => {
+      if (!data || typeof data.x !== 'number' || typeof data.y !== 'number') {
+        console.error("Données de requête de ressources invalides");
+        return;
+      }
+      
+      const radius = data.radius || 4; // Rayon par défaut de 4 chunks
+      console.log(`Demande manuelle de ressources pour le joueur ${client.sessionId} à (${data.x}, ${data.y}) avec rayon ${radius}`);
+      
+      // Collecter toutes les ressources dans le rayon
+      const resources = this.getResourcesInRange(data.x, data.y, radius);
+      console.log(`Envoi de ${resources.size} ressources au joueur ${client.sessionId} (requête manuelle)`);
+      
+      // Formater les données pour l'envoi
+      const resourcesData = [];
+      
+      for (const resourceId of resources) {
+        const resource = this.resources.get(resourceId);
+        if (resource && resource.amount > 0 && !resource.isRespawning) {
+          resourcesData.push({
+            id: resource.id,
+            type: resource.type,
+            x: resource.x,
+            y: resource.y,
+            amount: resource.amount,
+            isRespawning: false
+          });
+        }
+      }
+      
+      // Envoyer les ressources au client
+      client.send("refreshResources", {
+        count: resourcesData.length,
+        resources: resourcesData,
+        timestamp: Date.now()
+      });
     });
   }
 
@@ -827,8 +929,8 @@ export class GameRoom extends Room<GameStateSchema> {
     // Mettre à jour les positions des unités
     this.updateUnitPositions();
     
-    // Mettre à jour l'IA des villageois (10 fois par seconde)
-    if (!this.lastVillagerAIUpdate || now - this.lastVillagerAIUpdate > 100) {
+    // Mettre à jour l'IA des villageois (5 fois par seconde)
+    if (!this.lastVillagerAIUpdate || now - this.lastVillagerAIUpdate > 200) { // Utilisation d'un délai de 200ms
       this.updateVillagerAI();
       this.lastVillagerAIUpdate = now;
     }
@@ -942,6 +1044,12 @@ export class GameRoom extends Room<GameStateSchema> {
 
   // Nouvelle méthode pour optimiser les broadcasts
   private optimizeBroadcasts() {
+    // Si le filtrage natif est activé, ne pas utiliser le système personnalisé
+    if (this.useNativeFiltering) {
+      return; // Colyseus s'occupe de la synchronisation nativement
+    }
+    
+    // Code existant pour le système personnalisé
     const now = Date.now();
     
     // Parcourir tous les joueurs
@@ -1157,47 +1265,44 @@ export class GameRoom extends Room<GameStateSchema> {
 
   // Nouvelle méthode pour obtenir les ressources dans un rayon de chunks
   private getResourcesInRange(centerX: number, centerY: number, range: number = 2): Set<string> {
-    // Rediriger vers l'implémentation optimisée
-    return this.getResourcesInRangeV2(centerX, centerY, range);
-  }
-
-  // Nouvelle méthode pour obtenir les ressources dans un rayon de chunks
-  private getResourcesInRangeV2(x: number, y: number, radius: number = 2): Set<string> {
+    console.log(`Recherche de ressources autour de (${centerX}, ${centerY}) avec rayon ${range} chunks`);
+    
+    // Convertir les coordonnées en coordonnées de chunk
+    const centerChunkX = Math.floor(centerX / (TILE_SIZE * CHUNK_SIZE));
+    const centerChunkY = Math.floor(centerY / (TILE_SIZE * CHUNK_SIZE));
+    
     const resourcesInRange = new Set<string>();
+    let chunkCount = 0;
     
-    // Calculer les limites de la zone de recherche en termes de chunks
-    const tileRadius = radius * TILE_SIZE;
-    const minChunkX = Math.floor((x - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    const maxChunkX = Math.floor((x + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    const minChunkY = Math.floor((y - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    const maxChunkY = Math.floor((y + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    
-    // Parcourir tous les chunks dans la zone
-    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-      for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY++) {
+    // Parcourir tous les chunks dans le rayon spécifié
+    for (let dy = -range; dy <= range; dy++) {
+      for (let dx = -range; dx <= range; dx++) {
+        const chunkX = centerChunkX + dx;
+        const chunkY = centerChunkY + dy;
         const chunkKey = `${chunkX},${chunkY}`;
         
-        // Si ce chunk contient des ressources, les ajouter à notre ensemble
-        if (this.resourcesByChunk.has(chunkKey)) {
-          const chunkResources = this.resourcesByChunk.get(chunkKey);
-          
-          if (chunkResources) {
-            // Pour chaque ressource dans ce chunk, vérifier si elle est dans le rayon
-            for (const resourceId of chunkResources) {
-              const resource = this.resources.get(resourceId);
-              
-              if (resource) {
-                const distance = this.getDistance(x, y, resource.x, resource.y);
-                
-                // Si la ressource est dans le rayon, l'ajouter à notre ensemble
-                if (distance <= tileRadius) {
-                  resourcesInRange.add(resourceId);
-                }
-              }
+        // Obtenir les ressources de ce chunk
+        const chunkResources = this.resourcesByChunk.get(chunkKey);
+        if (chunkResources) {
+          chunkCount++;
+          // Ajouter toutes les ressources du chunk
+          chunkResources.forEach(resourceId => {
+            const resource = this.resources.get(resourceId);
+            // Ne pas inclure les ressources épuisées ou en respawn
+            if (resource && resource.amount > 0 && !resource.isRespawning) {
+              resourcesInRange.add(resourceId);
             }
-          }
+          });
         }
       }
+    }
+    
+    console.log(`Trouvé ${resourcesInRange.size} ressources dans ${chunkCount} chunks autour de (${centerChunkX}, ${centerChunkY})`);
+    
+    // Pour le débogage, afficher l'ID des 5 premières ressources
+    if (resourcesInRange.size > 0) {
+      const sampleResources = Array.from(resourcesInRange).slice(0, 5);
+      console.log(`Échantillon de ressources: ${sampleResources.join(', ')}`);
     }
     
     return resourcesInRange;
@@ -1970,13 +2075,25 @@ export class GameRoom extends Room<GameStateSchema> {
   // Méthode pour gérer la destruction d'un bâtiment
   private handleDestroyBuilding(buildingId: string) {
     const building = this.state.buildings.get(buildingId);
-    if (!building) return;
+    if (!building) {
+      console.warn(`Impossible de détruire le bâtiment ${buildingId}: non trouvé`);
+      return;
+    }
 
-    console.log(`Destruction du bâtiment ${building.type} (${buildingId})`);
+    console.log(`Destruction du bâtiment ${building.type} (ID: ${buildingId}) en position (${building.x}, ${building.y})`);
+    
+    // Enregistrer les informations du bâtiment avant de le supprimer
+    const buildingX = building.x;
+    const buildingY = building.y;
+    const buildingChunks = this.getChunksAroundPosition(buildingX, buildingY);
     
     const player = this.state.players.get(building.owner);
     if (!player) {
+      console.log(`Propriétaire ${building.owner} introuvable, suppression directe du bâtiment ${buildingId}`);
       this.state.buildings.delete(buildingId);
+      
+      // Informer tous les clients concernés de la suppression
+      this.broadcastToChunks("buildingRemoved", { buildingId }, buildingChunks);
       return;
     }
     
@@ -2028,7 +2145,16 @@ export class GameRoom extends Room<GameStateSchema> {
     }
     
     // Supprimer le bâtiment de l'état du jeu
+    console.log(`Suppression du bâtiment ${buildingId} de l'état du jeu...`);
     this.state.buildings.delete(buildingId);
+    console.log(`Bâtiment ${buildingId} supprimé avec succès`);
+    
+    // IMPORTANT: Envoyer un message explicite à tous les clients
+    // dans les chunks concernés pour forcer la mise à jour visuelle
+    this.broadcastToChunks("buildingRemoved", { buildingId }, buildingChunks);
+    
+    // Assurer que tous les clients sont informés même s'ils sont hors de portée des chunks
+    this.broadcast("buildingRemoved", { buildingId });
   }
 
   // Méthode pour charger la carte
@@ -2081,34 +2207,60 @@ export class GameRoom extends Room<GameStateSchema> {
     if (oldChunkX !== newChunkX || oldChunkY !== newChunkY) {
       console.log(`Joueur ${client.sessionId} a changé de chunk: (${oldChunkX}, ${oldChunkY}) -> (${newChunkX}, ${newChunkY})`);
       
-      const nearbyResources = this.getResourcesInRange(newX, newY);
-      console.log(`Envoi de ${nearbyResources.size} ressources au joueur ${client.sessionId}`);
+      // Augmenter le rayon pour s'assurer d'avoir assez de ressources (3 au lieu de 2)
+      const nearbyResources = this.getResourcesInRange(newX, newY, 3);
+      console.log(`Envoi de ${nearbyResources.size} ressources au joueur ${client.sessionId} après changement de chunk`);
       
-      const resourcesData = Array.from(nearbyResources).map(id => {
-        const resource = this.resources.get(id);
-        return {
-          id: resource?.id,
-          type: resource?.type,
-          x: resource?.x,
-          y: resource?.y,
-          amount: resource?.amount
-        };
-      });
+      // Obtenir les données complètes des ressources
+      const resourcesData = [];
+      
+      for (const resourceId of nearbyResources) {
+        const resource = this.resources.get(resourceId);
+        if (resource && resource.amount > 0 && !resource.isRespawning) {
+          resourcesData.push({
+            id: resource.id,
+            type: resource.type,
+            x: resource.x,
+            y: resource.y,
+            amount: resource.amount,
+            isRespawning: false
+          });
+        }
+      }
+      
+      console.log(`Données des ressources préparées: ${resourcesData.length} ressources valides`);
 
-      // Envoyer la mise à jour des ressources au client
+      // Envoyer une mise à jour complète des ressources au client
       client.send("updateVisibleResources", resourcesData);
     }
     
-    // Mettre à jour la position du joueur
-    player.x = newX;
-    player.y = newY;
+    // Vérifier si la position a réellement changé
+    const positionChanged = player.x !== newX || player.y !== newY;
     
-    // Diffuser le mouvement à tous les autres clients
-    this.broadcast("playerMoved", {
-      sessionId: client.sessionId,
-      x: newX,
-      y: newY
-    }, { except: client });
+    if (positionChanged) {
+      // Mettre à jour la position du joueur
+      const oldX = player.x;
+      const oldY = player.y;
+      
+      player.x = newX;
+      player.y = newY;
+      
+      // Log pour débogage
+      console.log(`Position du joueur ${client.sessionId} mise à jour: (${oldX}, ${oldY}) -> (${newX}, ${newY})`);
+      
+      // =============== DEBUG : BROADCAST FORCÉ ===============
+      // Envoyer explicitement un message de mise à jour de position à tous les clients
+      // pour déboguer la propagation des changements
+      this.broadcast("playerPositionDebug", {
+        id: client.sessionId,
+        x: newX,
+        y: newY,
+        timestamp: Date.now()
+      });
+      
+      // Note: Avec le filtrage natif de Colyseus, les mises à jour sont automatiquement
+      // propagées aux clients concernés sans code supplémentaire
+    }
   }
 
   // Nouvelle méthode pour mettre à jour les positions des unités
@@ -2116,35 +2268,53 @@ export class GameRoom extends Room<GameStateSchema> {
     // Pour chaque joueur
     this.state.players.forEach((player: PlayerSchema, playerId: string) => {
       // Trouver toutes les unités appartenant à ce joueur
+      // Inclure tous les types d'unités (guerriers et villageois)
       const playerUnits = Array.from(this.state.units.values())
-        .filter((unit: UnitSchema) => unit.owner === playerId && unit.type === "warrior");
+        .filter((unit: UnitSchema) => unit.owner === playerId);
       
-      if (playerUnits.length === 0) return;
+      // Traiter séparément les guerriers (pour les formations) et les villageois
+      const warriors = playerUnits.filter(unit => unit.type === UnitType.WARRIOR);
+      const villagers = playerUnits.filter(unit => unit.type === UnitType.VILLAGER);
       
-      // Déterminer le mode de mouvement des unités
-      if (player.isMovingUnits) {
-        // Mode déplacement vers une cible
-        // Activer le mode de ciblage par clic pour toutes les unités
-        playerUnits.forEach(unit => {
-          unit.isClickTargeting = true;
-        });
-        this.updateUnitsMoveTo(player, playerUnits);
-      }
-      else {
-        // Si on n'est plus en mode déplacement par clic,
-        // désactiver immédiatement le mode de ciblage pour toutes les unités
-        playerUnits.forEach(unit => {
-          unit.isClickTargeting = false;
-        });
-        
-        if (player.isTargetMode) {
-          // Mode cible (tab): formation en arcs face au curseur
-          this.updateUnitsTargetMode(player, playerUnits);
-        } else {
-          // Mode normal: formation derrière le joueur
-          this.updateUnitsFollowMode(player, playerUnits);
+      // Gérer les guerriers uniquement s'il y en a
+      if (warriors.length > 0) {
+        // Déterminer le mode de mouvement des guerriers
+        if (player.isMovingUnits) {
+          // Mode déplacement vers une cible
+          // Activer le mode de ciblage par clic pour toutes les unités
+          warriors.forEach(unit => {
+            unit.isClickTargeting = true;
+          });
+          this.updateUnitsMoveTo(player, warriors);
+        }
+        else {
+          // Si on n'est plus en mode déplacement par clic,
+          // désactiver immédiatement le mode de ciblage pour toutes les unités
+          warriors.forEach(unit => {
+            unit.isClickTargeting = false;
+          });
+          
+          if (player.isTargetMode) {
+            // Mode cible (tab): formation en arcs face au curseur
+            this.updateUnitsTargetMode(player, warriors);
+          } else {
+            // Mode normal: formation derrière le joueur
+            this.updateUnitsFollowMode(player, warriors);
+          }
         }
       }
+      
+      // Pour les villageois, s'assurer qu'ils ont aussi des cibles correctes
+      // quand ils ne sont pas contrôlés par l'IA
+      villagers.forEach(villager => {
+        // Ne pas modifier les villageois qui sont gérés par l'IA 
+        // (en mode récolte ou retour)
+        if (villager.state === UnitState.IDLE) {
+          // Pour les villageois en mode IDLE, assigner la position du joueur
+          // comme cible pour qu'ils le suivent
+          this.moveUnitToTarget(villager, player.x, player.y, playerUnits, 0);
+        }
+      });
     });
   }
   
@@ -2461,14 +2631,14 @@ export class GameRoom extends Room<GameStateSchema> {
     
     let newX, newY;
     
+    // Vitesse constante en pixels par frame, indépendante de la distance
+    // Définir la constante avant son utilisation
+    const FIXED_MOVEMENT_SPEED = 3.0; // pixels par frame
+    
     // Vérifier si l'unité est en mode de ciblage par clic (déplacement vers point cliqué)
     if (unit.isClickTargeting) {
       // Approche de VITESSE CONSTANTE (pas de facteur)
       // Utiliser un déplacement fixe en pixels par frame au lieu d'un pourcentage de la distance
-      
-      // Vitesse constante en pixels par frame, indépendante de la distance
-      // Vitesse de 3 pixels par frame
-      const FIXED_MOVEMENT_SPEED = 3.0; // pixels par frame
       
       // Si la distance est inférieure à la vitesse fixe, on arrive directement à destination
       if (distanceToTarget <= FIXED_MOVEMENT_SPEED) {
@@ -2511,9 +2681,37 @@ export class GameRoom extends Room<GameStateSchema> {
     
     // Vérifier que la nouvelle position est valide
     if (this.isValidPosition(newX, newY)) {
-      // Appliquer le mouvement uniquement si la destination est valide
-      unit.x = newX;
-      unit.y = newY;
+      // Position précédente pour détection de changement significatif
+      const oldX = unit.x;
+      const oldY = unit.y;
+      
+      // Calcul du mouvement pour déterminer si la mise à jour est significative
+      const moveDistance = Math.sqrt(Math.pow(newX - oldX, 2) + Math.pow(newY - oldY, 2));
+      
+      // OPTIMISATION: Seuil plus élevé pour la mise à jour des positions réelles x/y
+      // Uniquement mettre à jour x/y si le déplacement est significatif (> 3 pixels)
+      // ou si on est proche de la destination finale
+      const POSITION_UPDATE_THRESHOLD = 3.0;
+      const isSignificantMove = moveDistance > POSITION_UPDATE_THRESHOLD;
+      const isNearFinalDestination = distanceToTarget < FIXED_MOVEMENT_SPEED * 2;
+      
+      // Toujours mettre à jour targetX/targetY pour l'interpolation côté client
+      const targetChanged = Math.abs(unit.targetX - targetX) > 0.1 || Math.abs(unit.targetY - targetY) > 0.1;
+      if (targetChanged) {
+        unit.targetX = targetX;
+        unit.targetY = targetY;
+      }
+      
+      // Mettre à jour la position réelle seulement si nécessaire
+      // pour réduire le nombre de mises à jour réseau
+      if (isSignificantMove || isNearFinalDestination) {
+        unit.x = newX;
+        unit.y = newY;
+        
+        if (Math.random() < 0.005) { // Log moins fréquent (0.5% des cas)
+          console.log(`Position unité ${unit.id} mise à jour: (${oldX.toFixed(2)},${oldY.toFixed(2)}) → (${newX.toFixed(2)},${newY.toFixed(2)}) [dist=${moveDistance.toFixed(2)}px]`);
+        }
+      }
     }
   }
 
@@ -2940,12 +3138,17 @@ export class GameRoom extends Room<GameStateSchema> {
 
   // Méthode pour mettre à jour les zones d'intérêt des joueurs
   private updateInterestAreas() {
-    // Mettre à jour les positions de toutes les entités
+    // Si le filtrage natif est activé, mettre à jour uniquement les données nécessaires
+    if (this.useNativeFiltering) {
+      // Mettre à jour les positions des entités pour le système de collision
+      this.updateEntityPositions();
+      return;
+    }
+    
+    // Code existant pour le système personnalisé
     this.updateEntityPositions();
-
-    // Mettre à jour les entités par chunk
     this.updateEntitiesByChunk();
-
+    
     // Pour chaque joueur, mettre à jour sa zone d'intérêt
     this.state.players.forEach((player, playerId) => {
       this.updatePlayerInterestArea(player, playerId);
@@ -3176,7 +3379,7 @@ export class GameRoom extends Room<GameStateSchema> {
     
     // Dans Colyseus 0.14, nous configurons le filtrage au niveau du schéma
     // en utilisant les événements onAdd et onChange
-    this.state.players.onAdd = (player, sessionId) => {
+    this.state.players.onAdd((player: PlayerSchema, sessionId: string) => {
       console.log(`Joueur ajouté à l'état: ${sessionId}`);
       
       // Déterminer dans quel chunk se trouve ce joueur
@@ -3205,45 +3408,74 @@ export class GameRoom extends Room<GameStateSchema> {
       };
       
       this.broadcastToChunks("playerAdded", playerData, initialChunks);
+    });
+
+    // Gestionnaire onChange défini correctement au niveau des objets individuels
+    // Important: utiliser une fonction lambda typée pour éviter les erreurs
+    this.state.players.onChange((player: PlayerSchema, sessionId: string) => {
+      // Colyseus se charge automatiquement de propager les changements aux clients concernés
+      console.log(`Changement détecté pour le joueur ${sessionId}: position (${player.x}, ${player.y})`);
       
-      player.onChange = (changes) => {
-        // Envoyer les mises à jour de façon optimisée
-        this.sendOptimizedEntityUpdate('player', sessionId, changes);
-      };
-    };
+      // Forcer la propagation des changements via Colyseus
+      // Notez que nous n'avons pas besoin d'envoyer un message explicite,
+      // Colyseus gère automatiquement la propagation si les handlers sont correctement définis
+    });
     
-    this.state.units.onAdd = (unit, unitId) => {
+    this.state.units.onAdd((unit: UnitSchema, unitId: string) => {
       console.log(`Unité ajoutée à l'état: ${unitId}`);
       
-      // Déterminer dans quel chunk se trouve cette unité
+      // Initialiser correctement les valeurs targetX et targetY
+      unit.targetX = unit.x;
+      unit.targetY = unit.y;
+      
+      // Notifier les clients concernés en fonction de la position de l'unité
       const unitChunks = this.getChunksAroundPosition(unit.x, unit.y);
       
-      // Envoyer l'ajout initial à tous les clients concernés
+      // Envoyer des données simplifiées de l'unité
       const unitData = {
         id: unitId,
-        type: unit.type,
         owner: unit.owner,
+        type: unit.type,
         x: unit.x,
         y: unit.y,
+        targetX: unit.targetX,
+        targetY: unit.targetY,
         health: unit.health,
         maxHealth: unit.maxHealth
       };
       
       this.broadcastToChunks("unitAdded", unitData, unitChunks);
-      
-      unit.onChange = (changes) => {
-        // Envoyer les mises à jour de façon optimisée
-        this.sendOptimizedEntityUpdate('unit', unitId, changes);
-      };
-    };
+    });
     
-    this.state.buildings.onAdd = (building, buildingId) => {
+    // Gestionnaire onChange pour les unités défini correctement
+    this.state.units.onChange((unit: UnitSchema, unitId: string) => {
+      // Log avec détails supplémentaires de façon occasionnelle (10% des cas)
+      if (Math.random() < 0.1) {
+        console.log(`Changement détecté pour l'unité ${unitId}: position (${unit.x}, ${unit.y}), cible (${unit.targetX}, ${unit.targetY})`);
+      }
+      
+      // Déterminer dans quels chunks l'unité est visible
+      const unitChunks = this.getChunksAroundPosition(unit.x, unit.y);
+      
+      // S'assurer que la position cible est correctement mise à jour
+      // En cas de déplacement significatif, mettre à jour manuellement
+      if (Math.abs(unit.x - unit.targetX) > 1 || Math.abs(unit.y - unit.targetY) > 1) {
+        // Mettre à jour la position cible si elle est significativement différente
+        // Debug: s'assurer que targetX/Y sont correctement propagés
+        console.log(`Mise à jour importante pour l'unité ${unitId}: Position (${unit.x}, ${unit.y}) → Cible (${unit.targetX}, ${unit.targetY})`);
+        
+        // Colyseus se charge automatiquement de propager les changements
+        // Nous n'avons pas besoin d'envoyer un message explicite
+      }
+    });
+
+    this.state.buildings.onAdd((building: BuildingSchema, buildingId: string) => {
       console.log(`Bâtiment ajouté à l'état: ${buildingId}`);
       
-      // Déterminer dans quel chunk se trouve ce bâtiment
+      // Notifier les clients en fonction de la position du bâtiment
       const buildingChunks = this.getChunksAroundPosition(building.x, building.y);
       
-      // Envoyer l'ajout initial à tous les clients concernés
+      // Envoyer des données simplifiées du bâtiment
       const buildingData = {
         id: buildingId,
         type: building.type,
@@ -3251,18 +3483,28 @@ export class GameRoom extends Room<GameStateSchema> {
         x: building.x,
         y: building.y,
         health: building.health,
-        maxHealth: building.maxHealth,
-        productionProgress: building.productionProgress,
-        productionActive: building.productionActive
+        maxHealth: building.maxHealth
       };
       
       this.broadcastToChunks("buildingAdded", buildingData, buildingChunks);
+    });
+    
+    // Gestionnaire onChange pour les bâtiments défini correctement
+    this.state.buildings.onChange((building: BuildingSchema, buildingId: string) => {
+      // Colyseus se charge automatiquement de propager les changements aux clients concernés
+      console.log(`Changement détecté pour le bâtiment ${buildingId}: état (${building.health}/${building.maxHealth})`);
+    });
+    
+    // Ajouter un handler onRemove pour les bâtiments
+    this.state.buildings.onRemove((building: BuildingSchema, buildingId: string) => {
+      console.log(`Bâtiment supprimé de l'état: ${buildingId}`);
       
-      building.onChange = (changes) => {
-        // Envoyer les mises à jour de façon optimisée
-        this.sendOptimizedEntityUpdate('building', buildingId, changes);
-      };
-    };
+      // Obtenir les chunks où ce bâtiment était visible
+      const buildingChunks = this.getChunksAroundPosition(building.x, building.y);
+      
+      // Informer tous les clients concernés de la suppression
+      this.broadcastToChunks("buildingRemoved", { buildingId }, buildingChunks);
+    });
     
     console.log("Filtrage des entités configuré avec succès.");
   }
@@ -3388,8 +3630,40 @@ export class GameRoom extends Room<GameStateSchema> {
 
   // Méthode pour obtenir toutes les ressources dans un rayon donné
   private getResourcesInRange(x: number, y: number, radius: number = 2): Set<string> {
-    // Rediriger vers la nouvelle implémentation optimisée
-    return this.getResourcesInRangeV2(x, y, radius);
+    console.log(`Recherche de ressources autour de (${x}, ${y}) avec rayon ${radius} chunks`);
+    
+    // Convertir les coordonnées en coordonnées de chunk
+    const centerChunkX = Math.floor(x / (TILE_SIZE * CHUNK_SIZE));
+    const centerChunkY = Math.floor(y / (TILE_SIZE * CHUNK_SIZE));
+    
+    const resourcesInRange = new Set<string>();
+    let chunkCount = 0;
+    
+    // Parcourir tous les chunks dans le rayon spécifié
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const chunkX = centerChunkX + dx;
+        const chunkY = centerChunkY + dy;
+        const chunkKey = `${chunkX},${chunkY}`;
+        
+        // Obtenir les ressources de ce chunk
+        const chunkResources = this.resourcesByChunk.get(chunkKey);
+        if (chunkResources) {
+          chunkCount++;
+          // Ajouter toutes les ressources du chunk
+          chunkResources.forEach(resourceId => {
+            const resource = this.resources.get(resourceId);
+            // Ne pas inclure les ressources épuisées ou en respawn
+            if (resource && resource.amount > 0 && !resource.isRespawning) {
+              resourcesInRange.add(resourceId);
+            }
+          });
+        }
+      }
+    }
+    
+    console.log(`${resourcesInRange.size} ressources trouvées dans ${chunkCount} chunks`);
+    return resourcesInRange;
   }
 
   // Nouvelle méthode pour gérer l'épuisement des ressources de manière centralisée
@@ -3524,48 +3798,6 @@ export class GameRoom extends Room<GameStateSchema> {
     return entities;
   }
 
-  // Pour compatibilité temporaire - sera supprimé après refactoring complet
-  private getResourcesInRangeV2(x: number, y: number, radius: number = 2): Set<string> {
-    const resourcesInRange = new Set<string>();
-    
-    // Calculer les limites de la zone de recherche en termes de chunks
-    const tileRadius = radius * TILE_SIZE;
-    const minChunkX = Math.floor((x - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    const maxChunkX = Math.floor((x + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    const minChunkY = Math.floor((y - tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    const maxChunkY = Math.floor((y + tileRadius) / (CHUNK_SIZE * TILE_SIZE));
-    
-    // Parcourir tous les chunks dans la zone
-    for (let chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
-      for (let chunkY = minChunkY; chunkY <= maxChunkY; chunkY++) {
-        const chunkKey = `${chunkX},${chunkY}`;
-        
-        // Si ce chunk contient des ressources, les ajouter à notre ensemble
-        if (this.resourcesByChunk.has(chunkKey)) {
-          const chunkResources = this.resourcesByChunk.get(chunkKey);
-          
-          if (chunkResources) {
-            // Pour chaque ressource dans ce chunk, vérifier si elle est dans le rayon
-            for (const resourceId of chunkResources) {
-              const resource = this.resources.get(resourceId);
-              
-              if (resource) {
-                const distance = this.getDistance(x, y, resource.x, resource.y);
-                
-                // Si la ressource est dans le rayon, l'ajouter à notre ensemble
-                if (distance <= tileRadius) {
-                  resourcesInRange.add(resourceId);
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    
-    return resourcesInRange;
-  }
-
   // Méthode pour gérer une attaque sur un bâtiment
   private performBuildingAttack(attacker: UnitSchema, building: BuildingSchema, buildingId: string, now: number) {
     // Mettre à jour le temps de la dernière attaque
@@ -3599,5 +3831,10 @@ export class GameRoom extends Room<GameStateSchema> {
       maxHealth: building.maxHealth,
       attackerId: attacker.id
     });
+  }
+
+  // Mise à jour du ping
+  private updatePings() {
+    // Implémentation de la mise à jour des pings
   }
 } 

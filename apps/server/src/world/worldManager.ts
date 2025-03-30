@@ -13,7 +13,7 @@ export function loadMap(): WorldData {
   
   try {
     // Chemin vers le fichier de carte
-    const mapPath = path.join(__dirname, '..', 'default.map');
+    const mapPath = path.join(__dirname, '../maps/', 'default.map');
     console.log("Chargement de la carte depuis:", mapPath);
     
     // Lire le fichier

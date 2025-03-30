@@ -59,21 +59,13 @@ export const COMBAT = {
 // ====== RESSOURCES DE DÉPART DU JOUEUR ======
 
 // Quantités de ressources données au joueur lors de sa création
-// export const PLAYER_STARTING_RESOURCES = {
-//   [ResourceType.WOOD]: 1000,
-//   [ResourceType.STONE]: 1000,
-//   [ResourceType.GOLD]: 1000,
-//   [ResourceType.IRON]: 1000,
-//   [ResourceType.COAL]: 1000,
-//   [ResourceType.STEEL]: 1000
-// }; 
 export const PLAYER_STARTING_RESOURCES = {
-  [ResourceType.WOOD]: 0,
-  [ResourceType.STONE]: 0,
-  [ResourceType.GOLD]: 0,
-  [ResourceType.IRON]: 0,
-  [ResourceType.COAL]: 0,
-  [ResourceType.STEEL]: 0
+  [ResourceType.WOOD]: 1000,
+  [ResourceType.STONE]: 1000,
+  [ResourceType.GOLD]: 1000,
+  [ResourceType.IRON]: 1000,
+  [ResourceType.COAL]: 1000,
+  [ResourceType.STEEL]: 1000
 };
 
 // ====== COÛTS DE CONSTRUCTION ======
@@ -134,7 +126,9 @@ export const RESOURCE_AMOUNTS = {
   [ResourceType.GOLD]: 100,
   [ResourceType.WOOD]: 10,
   [ResourceType.STONE]: 20,
-
+  [ResourceType.IRON]: 30,
+  [ResourceType.COAL]: 40,
+  [ResourceType.STEEL]: 50
 };
 
 // Temps de respawn des ressources (en millisecondes)
@@ -183,8 +177,10 @@ export const POPULATION = {
 // ====== OPTIMISATION DU JEU ======
 
 export const PERFORMANCE = {
-  NEARBY_UPDATE_RATE: 100, // ms (10 fois par seconde)
-  DISTANT_UPDATE_RATE: 500, // ms (2 fois par seconde)
-  SIMULATION_INTERVAL: 1000 / 30, // ms (30 fois par seconde)
-  RENDER_OPTIMIZATION_INTERVAL: 500, // ms
+  NEARBY_UPDATE_RATE: 200, // ms (5 fois par seconde au lieu de 10)
+  DISTANT_UPDATE_RATE: 1000, // ms (1 fois par seconde au lieu de 2)
+  SIMULATION_INTERVAL: 1000 / 20, // ms (20 fois par seconde au lieu de 30)
+  RENDER_OPTIMIZATION_INTERVAL: 750, // ms (plus espacé pour réduire la charge CPU)
+  THROTTLE_THRESHOLD: 3.0, // Seuil en pixels pour considérer un mouvement comme significatif
+  VILLAGER_AI_UPDATE_RATE: 200, // ms (5 fois par seconde pour l'IA des villageois)
 }; 

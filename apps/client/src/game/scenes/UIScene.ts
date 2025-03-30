@@ -914,7 +914,7 @@ export class UIScene extends Phaser.Scene {
         
         // Notifier la GameScene pour arrêter le mode de placement du bâtiment
         if (this.gameScene) {
-          this.gameScene.events.emit('stopPlacingBuilding');
+          this.gameScene.events.emit('stopPlacingBuilding', true);
         }
       }
     }

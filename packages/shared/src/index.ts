@@ -56,6 +56,11 @@ export class PlayerSchema extends Schema {
   @type("number") maxPopulation: number = 0;
   @type("string") tool: string = "pickaxe";
   @type({ map: "number" }) resources = new MapSchema<number>();
+  @type("boolean") isDead: boolean = false;
+  @type("boolean") isTargetMode: boolean = false;
+  @type("boolean") isMovingUnits: boolean = false;
+  @type("number") targetCursorX: number = 0;
+  @type("number") targetCursorY: number = 0;
 }
 
 export class UnitSchema extends Schema {
@@ -67,8 +72,12 @@ export class UnitSchema extends Schema {
   @type("number") health: number = 100;
   @type("number") maxHealth: number = 100;
   @type("string") state: string = UnitState.IDLE;
-  @type("number") targetX?: number;
-  @type("number") targetY?: number;
+  @type("number") targetX: number = 0;
+  @type("number") targetY: number = 0;
+  @type("boolean") isClickTargeting: boolean = false;
+  @type("string") owner: string = "";
+  @type("boolean") isHarvesting: boolean = false;
+  @type("number") lastAttackTime: number = 0;
 }
 
 export class BuildingSchema extends Schema {

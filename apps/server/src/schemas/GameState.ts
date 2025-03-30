@@ -73,6 +73,8 @@ export class UnitSchema extends Schema {
   @type("number") maxHealth: number = UNIT_HEALTH.WARRIOR.MAX_HEALTH;
   @type("number") rotation: number = 0;
   @type("boolean") isClickTargeting: boolean = false; // Indique si l'unité se déplace vers un point cliqué
+  @type("number") targetX: number = 0; // Position cible X pour l'interpolation côté client
+  @type("number") targetY: number = 0; // Position cible Y pour l'interpolation côté client
   
   // Nouvelles propriétés pour le système de combat
   @type("number") damage: number = COMBAT.UNIT_BASE_DAMAGE; // Dégâts de base

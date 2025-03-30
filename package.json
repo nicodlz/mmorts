@@ -26,7 +26,8 @@
     "node": ">=18"
   },
   "dependencies": {
-    "@colyseus/core": "^0.16.10",
+    "@colyseus/core": "^0.15.10",
+    "@colyseus/schema": "^2.0.15",
     "nanoid": "^5.1.3"
   }
 }

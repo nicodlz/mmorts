@@ -175,8 +175,8 @@ export class PerformanceManager {
         this._renderOptimizationInterval = 250;
         this._cleanupInterval = 3000;
         this._maxTilePoolSize = 300;
-        this._positionThreshold = 1.0;
-        this._lerpFactor = 0.05;
+        this._positionThreshold = 0.001; // Seuil de détection plus petit pour des mouvements plus précis
+        this._lerpFactor = 0.2;     // Interpolation plus rapide en basse qualité pour compenser les mises à jour moins fréquentes
         this._effectsQuality = 0.5;
         break;
         
@@ -188,8 +188,8 @@ export class PerformanceManager {
         this._renderOptimizationInterval = 500;
         this._cleanupInterval = 5000;
         this._maxTilePoolSize = 500;
-        this._positionThreshold = 0.5;
-        this._lerpFactor = 0.08;
+        this._positionThreshold = 0.001;    // Seuil plus précis
+        this._lerpFactor = 0.25;           // Interpolation plus fluide
         this._effectsQuality = 0.75;
         break;
         
@@ -201,8 +201,8 @@ export class PerformanceManager {
         this._renderOptimizationInterval = 750;
         this._cleanupInterval = 7000;
         this._maxTilePoolSize = 750;
-        this._positionThreshold = 0.2;
-        this._lerpFactor = 0.12;
+        this._positionThreshold = 0.001;    // Seuil très précis
+        this._lerpFactor = 0.3;            // Interpolation très fluide
         this._effectsQuality = 1.0;
         break;
     }
