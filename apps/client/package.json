@@ -8,27 +8,25 @@
     "dev:prod": "vite --mode production",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "lint": "eslint src --ext ts,tsx",
-    "check-types": "tsc --noEmit"
+    "lint": "eslint src --max-warnings 0",
+    "check-types": "tsc --noEmit",
+    "test": "playwright test"
   },
   "dependencies": {
-    "@types/matter-js": "^0.19.8",
-    "colyseus.js": "^0.14.13",
-    "matter-js": "^0.20.0",
-    "phaser": "^3.80.1",
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "@colyseus/sdk": "^0.17.0",
+    "phaser": "^3.90.0",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
     "shared": "workspace:*"
   },
   "devDependencies": {
-    "@types/react": "^18.2.37",
-    "@types/react-dom": "^18.2.15",
-    "@vitejs/plugin-react": "^4.2.0",
-    "eslint": "^8.53.0",
-    "eslint-config-prettier": "^9.1.0",
-    "eslint-plugin-react": "^7.33.2",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "typescript": "^5.2.2",
-    "vite": "^5.0.0"
+    "@playwright/test": "^1.63.0",
+    "@repo/eslint-config": "workspace:*",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^5.2.0",
+    "eslint": "^9.39.5",
+    "typescript": "5.9.3",
+    "vite": "^7.3.6"
   }
 }

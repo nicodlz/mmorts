@@ -1,58 +1,63 @@
-import { Server } from "colyseus";
-import { createServer } from "http";
+import { Server } from "@colyseus/core";
+import { WebSocketTransport } from "@colyseus/ws-transport";
+import { createServer } from "node:http";
+import { join } from "node:path";
 import express from "express";
 import cors from "cors";
+import compression from "compression";
 import { monitor } from "@colyseus/monitor";
+import { Encoder } from "@colyseus/schema";
 import { GameRoom } from "./rooms/GameRoom";
 import { loadMap } from "./world/worldManager";
 
-// Déterminer le mode d'exécution
-const isProduction = process.env.NODE_ENV === 'production';
-const port = Number(process.env.PORT || 2567);
-const app = express();
-
-// Configuration CORS plus permissive
-app.use(cors({
-  origin: true, // Permet toutes les origines
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
-  credentials: true,
-  maxAge: 86400 // Cache pour 24 heures
-}));
-
-app.use(express.json());
-
-// Monitoring route
-app.use("/colyseus", monitor());
-
-// Initialiser le monde au démarrage du serveur
-console.log("Initialisation du monde du serveur...");
-const worldData = loadMap();
-console.log("Monde initialisé avec succès!");
-
-// Create HTTP & WebSocket servers
-const server = createServer(app);
-const gameServer = new Server({
-  server: server,
-  // Configuration standard pour Colyseus
-  gracefullyShutdown: true
-});
-
-// Register game room with world data and configure
-const roomHandler = gameServer.define("game_room", GameRoom, { worldData })
-  .enableRealtimeListing();
-
-// La configuration de l'intervalle de simulation doit être faite dans la méthode onCreate
-// de la classe GameRoom, pas ici. Nous supprimons donc ces lignes incorrectes.
-
-// Start server
-gameServer.listen(port, "0.0.0.0").then(() => {
-  console.log(`🚀 Server started in ${isProduction ? 'PRODUCTION' : 'DEVELOPMENT'} mode`);
-  console.log(`🚀 Listening on all interfaces (0.0.0.0:${port})`);
-  console.log(`🎮 Colyseus monitor available at http://0.0.0.0:${port}/colyseus`);
-  console.log(`📝 CORS enabled for all origins`);
-  console.log(`⚡ Interest Areas enabled for efficient network usage`);
-}).catch(err => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-}); 
+export function createGameServer() {
+  Encoder.BUFFER_SIZE = 64 * 1024;
+  const app = express();
+  app.use(compression());
+  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  app.use(cors({ origin: allowedOrigins?.length ? allowedOrigins : true }));
+  app.use(express.json({ limit: "16kb" }));
+  app.get("/health", (_req, res) => res.json({ status: "ok" }));
+  // Keep administration off public production servers unless explicitly configured.
+  if (process.env.NODE_ENV !== "production") app.use("/colyseus", monitor());
+  if (process.env.NODE_ENV === "production") {
+    const clientDist = join(__dirname, "../../client/dist");
+    app.use(
+      "/assets",
+      express.static(join(clientDist, "assets"), {
+        immutable: true,
+        maxAge: "1y",
+      }),
+    );
+    app.use(express.static(clientDist));
+  }
+  const httpServer = createServer(app);
+  const gameServer = new Server({
+    transport: new WebSocketTransport({
+      server: httpServer,
+      maxPayload: 16 * 1024,
+    }),
+  });
+  gameServer.define("game_room", GameRoom, { worldData: loadMap() });
+  return { gameServer, httpServer, app };
+}
+if (require.main === module) {
+  const port = Number(process.env.PORT || 2567);
+  if (!Number.isInteger(port) || port < 0 || port > 65535)
+    throw new Error("PORT must be a valid TCP port.");
+  const { gameServer, httpServer } = createGameServer();
+  gameServer
+    .listen(port, process.env.HOST || "0.0.0.0")
+    .then(() => {
+      const address = httpServer.address();
+      console.log(
+        `PvPStrat server listening on port ${address && typeof address !== "string" ? address.port : port}`,
+      );
+    })
+    .catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+}

@@ -13,6 +13,7 @@ import { config as baseConfig } from "./base.js";
  * @type {import("eslint").Linter.Config[]}
  * */
 export const nextJsConfig = [
+  { ignores: [".next/**", "out/**", "next-env.d.ts"] },
   ...baseConfig,
   js.configs.recommended,
   eslintConfigPrettier,

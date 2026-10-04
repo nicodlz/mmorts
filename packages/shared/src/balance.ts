@@ -3,7 +3,8 @@
  * Centralise tous les paramètres d'équilibrage du jeu
  */
 
-import { ResourceType, BuildingType, BUILDING_COSTS } from './index';
+import { ResourceType, BuildingType } from "./types";
+import type { ResourceAmounts } from "./constants";
 
 // ====== POINTS DE VIE ET DÉGÂTS ======
 
@@ -38,20 +39,20 @@ export const COMBAT = {
   // Paramètres de base des dégâts
   UNIT_BASE_DAMAGE: 25,
   DAMAGE_RANDOM_VARIATION: 0.1, // ±10% de variation
-  
+
   // Modificateurs de dégâts
   DEFENSIVE_MODE_REDUCTION: 0.3, // Réduction de 30% en mode défensif
   PLAYER_DAMAGE_REDUCTION: 0.2, // Réduction de 20% contre les joueurs
   BUILDING_DAMAGE_REDUCTION: 0.25, // Réduction de 25% contre les bâtiments
-  
+
   // Paramètres d'attaque
   ATTACK_COOLDOWN: 500, // ms entre chaque attaque
   ATTACK_RANGE: 20, // pixels
-  
+
   // Effets visuels
   DAMAGE_FLASH_COUNT: 3, // Nombre de clignotements lors des dégâts
   DAMAGE_FLASH_DURATION: 100, // Durée d'un clignotement en ms
-  
+
   // Effets de balancing spécifiques
   CRITICAL_HEALTH_THRESHOLD: 0.3, // Seuil de santé critique (30%)
 };
@@ -66,14 +67,14 @@ export const COMBAT = {
 //   [ResourceType.IRON]: 1000,
 //   [ResourceType.COAL]: 1000,
 //   [ResourceType.STEEL]: 1000
-// }; 
+// };
 export const PLAYER_STARTING_RESOURCES = {
   [ResourceType.WOOD]: 0,
   [ResourceType.STONE]: 0,
   [ResourceType.GOLD]: 0,
   [ResourceType.IRON]: 0,
   [ResourceType.COAL]: 0,
-  [ResourceType.STEEL]: 0
+  [ResourceType.STEEL]: 0,
 };
 
 // ====== COÛTS DE CONSTRUCTION ======
@@ -84,14 +85,16 @@ export const PLAYER_STARTING_RESOURCES = {
 // ====== PRODUCTION DE RESSOURCES ======
 
 // Taux de production en millisecondes
-export const PRODUCTION_RATES = {
+export const PRODUCTION_RATES: Partial<Record<BuildingType, number>> = {
   [BuildingType.FURNACE]: 10000, // 10 secondes pour le charbon
-  [BuildingType.FORGE]: 8000,    // 8 secondes pour le fer
+  [BuildingType.FORGE]: 8000, // 8 secondes pour le fer
   [BuildingType.FACTORY]: 30000, // 30 secondes pour l'acier
 };
 
 // Recettes de production
-export const PRODUCTION_RECIPES = {
+export const PRODUCTION_RECIPES: Partial<
+  Record<BuildingType, { inputs: ResourceAmounts; outputs: ResourceAmounts }>
+> = {
   [BuildingType.FURNACE]: {
     inputs: { [ResourceType.WOOD]: 5 },
     outputs: { [ResourceType.COAL]: 1 },
@@ -126,25 +129,24 @@ export const HARVEST_AMOUNT = {
   [ResourceType.STONE]: 2,
   [ResourceType.IRON]: 0, // Non récoltable directement
   [ResourceType.COAL]: 0, // Non récoltable directement
-  [ResourceType.STEEL]: 0  // Non récoltable directement
+  [ResourceType.STEEL]: 0, // Non récoltable directement
 };
 
 // Quantités initiales des ressources dans l'environnement
-export const RESOURCE_AMOUNTS = {
+export const RESOURCE_AMOUNTS: Partial<Record<ResourceType, number>> = {
   [ResourceType.GOLD]: 100,
   [ResourceType.WOOD]: 10,
   [ResourceType.STONE]: 20,
-
 };
 
 // Temps de respawn des ressources (en millisecondes)
 export const RESOURCE_RESPAWN_TIMES = {
-  [ResourceType.GOLD]: 999999999,   // Désactivé temporairement
-  [ResourceType.WOOD]: 999999999,   // Désactivé temporairement
-  [ResourceType.STONE]: 999999999,  // Désactivé temporairement
-  [ResourceType.IRON]: 999999999,   // Désactivé temporairement
-  [ResourceType.COAL]: 999999999,   // Désactivé temporairement
-  [ResourceType.STEEL]: 999999999,  // Désactivé temporairement
+  [ResourceType.GOLD]: 0, // 0 disables respawning
+  [ResourceType.WOOD]: 0, // 0 disables respawning
+  [ResourceType.STONE]: 0, // 0 disables respawning
+  [ResourceType.IRON]: 0, // 0 disables respawning
+  [ResourceType.COAL]: 0, // 0 disables respawning
+  [ResourceType.STEEL]: 0, // 0 disables respawning
 };
 
 // ====== UNITÉS MILITAIRES ======
@@ -176,7 +178,7 @@ export const DEATH_SYSTEM = {
 // ====== POPULATION ======
 
 export const POPULATION = {
-  DEFAULT_MAX: 10,
+  DEFAULT_MAX: 0,
   HOUSE_INCREASE: 10, // Augmentation par maison
 };
 
@@ -187,4 +189,7 @@ export const PERFORMANCE = {
   DISTANT_UPDATE_RATE: 500, // ms (2 fois par seconde)
   SIMULATION_INTERVAL: 1000 / 30, // ms (30 fois par seconde)
   RENDER_OPTIMIZATION_INTERVAL: 500, // ms
-}; 
+  VILLAGER_AI_INTERVAL: 100,
+  NETWORK_INTERVAL: 100,
+  MAX_TICK_DELTA: 100,
+};

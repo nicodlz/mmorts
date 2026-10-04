@@ -1,146 +1,83 @@
-# Turborepo starter
+# PvPStrat.io
 
-This Turborepo starter is maintained by the Turborepo core team.
+Jeu de stratégie multijoueur en TypeScript. Phaser affiche le monde ; Colyseus synchronise les entités visibles. Le serveur valide les déplacements, récoltes, constructions et commandes d’unités.
 
-## Using this example
+## Développement
 
-Run the following command:
+Utiliser Node.js 20.19+ ou 22.12+ et pnpm 9.
 
 ```sh
-npx create-turbo@latest
-```
-
-## What's inside?
-
-This Turborepo includes the following packages/apps:
-
-### Apps and Packages
-
-- `docs`: a [Next.js](https://nextjs.org/) app
-- `web`: another [Next.js](https://nextjs.org/) app
-- `@repo/ui`: a stub React component library shared by both `web` and `docs` applications
-- `@repo/eslint-config`: `eslint` configurations (includes `eslint-config-next` and `eslint-config-prettier`)
-- `@repo/typescript-config`: `tsconfig.json`s used throughout the monorepo
-
-Each package/app is 100% [TypeScript](https://www.typescriptlang.org/).
-
-### Utilities
-
-This Turborepo has some additional tools already setup for you:
-
-- [TypeScript](https://www.typescriptlang.org/) for static type checking
-- [ESLint](https://eslint.org/) for code linting
-- [Prettier](https://prettier.io) for code formatting
-
-### Build
-
-To build all apps and packages, run the following command:
-
-```
-cd my-turborepo
-pnpm build
-```
-
-### Develop
-
-To develop all apps and packages, run the following command:
-
-```
-cd my-turborepo
+pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-### Remote Caching
+Ouvrir `http://localhost:3000`. Le serveur écoute sur le port 2567 ; Vite transmet HTTP et WebSocket sous `/colyseus`. Le package partagé est recompilé automatiquement.
 
-> [!TIP]
-> Vercel Remote Cache is free for all plans. Get started today at [vercel.com](https://vercel.com/signup?/signup?utm_source=remote-cache-sdk&utm_campaign=free_remote_cache).
+Les applications `apps/web` et `apps/docs` sont les exemples Next.js conservés dans le monorepo. Elles ne servent pas le jeu. Les lancer séparément avec `pnpm --filter web dev` ou `pnpm --filter docs dev`.
 
-Turborepo can use a technique known as [Remote Caching](https://turbo.build/repo/docs/core-concepts/remote-caching) to share cache artifacts across machines, enabling you to share build caches with your team and CI/CD pipelines.
+## Commandes du jeu
 
-By default, Turborepo will cache locally. To enable Remote Caching you will need an account with Vercel. If you don't have an account you can [create one](https://vercel.com/signup?utm_source=turborepo-examples), then enter the following commands:
+| Commande                | Action                                   |
+| ----------------------- | ---------------------------------------- |
+| WASD, ZQSD ou flèches   | Déplacer le joueur                       |
+| Clic gauche maintenu    | Récolter une ressource proche            |
+| B                       | Ouvrir les constructions                 |
+| Clic sur un bâtiment    | Afficher ses actions                     |
+| Tab                     | Basculer entre récolte et combat         |
+| Clic maintenu en combat | Donner une destination à l’armée         |
+| M                       | Afficher la carte et y commander l’armée |
+| Échap ou clic droit     | Annuler la construction sélectionnée     |
 
-```
-cd my-turborepo
-npx turbo login
-```
+Le joueur commence sans ressources. Les maisons augmentent la capacité de population ; les casernes recrutent les soldats et les centres-villes recrutent les villageois. Les coûts et recettes sont centralisés dans `packages/shared/src`.
 
-This will authenticate the Turborepo CLI with your [Vercel account](https://vercel.com/docs/concepts/personal-accounts/overview).
+## Vérification
 
-Next, you can link your Turborepo to your Remote Cache by running the following command from the root of your Turborepo:
-
-```
-npx turbo link
-```
-
-## Useful Links
-
-Learn more about the power of Turborepo:
-
-- [Tasks](https://turbo.build/repo/docs/core-concepts/monorepos/running-tasks)
-- [Caching](https://turbo.build/repo/docs/core-concepts/caching)
-- [Remote Caching](https://turbo.build/repo/docs/core-concepts/remote-caching)
-- [Filtering](https://turbo.build/repo/docs/core-concepts/monorepos/filtering)
-- [Configuration Options](https://turbo.build/repo/docs/reference/configuration)
-- [CLI Usage](https://turbo.build/repo/docs/reference/command-line-reference)
-
-## Configuration du Serveur
-
-### Mode de Développement Local (par défaut)
-
-Par défaut, le client se connecte au serveur en local à l'adresse `http://localhost:2567`. Cette configuration est définie dans le fichier `apps/client/.env`.
-
-### Mode VPS avec IP Externe
-
-Pour connecter le client à un serveur distant :
-
-1. Modifiez le fichier `apps/client/.env` en commentant les lignes de serveur local et en décommentant les lignes avec l'adresse IP du VPS :
-   ```
-   # Configuration du serveur local (par défaut)
-   # VITE_SERVER_URL=http://localhost:2567
-   # VITE_COLYSEUS_URL=ws://localhost:2567
-
-   # Pour utiliser le serveur distant, décommentez ces lignes
-   VITE_SERVER_URL=http://57.128.190.227:2567
-   VITE_COLYSEUS_URL=ws://57.128.190.227:2567
-   ```
-
-2. Si vous déployez pour la production, utilisez plutôt le fichier `apps/client/.env.production` qui est déjà configuré avec l'adresse IP du VPS.
-
-### Exécution avec Arguments de Ligne de Commande
-
-Vous pouvez maintenant exécuter le client et le serveur en mode production directement à l'aide d'arguments de ligne de commande, sans avoir à modifier manuellement les fichiers `.env` :
-
-#### Client en mode développement (localhost)
-```
-pnpm run client
+```sh
+pnpm --filter client exec playwright install chromium
+pnpm lint check-types
+pnpm test
+pnpm build
+pnpm smoke-production
+pnpm benchmark
+pnpm audit --prod
 ```
 
-#### Client en mode production (utilise l'IP externe)
-```
-pnpm run client:prod
+Les tests serveur utilisent le lanceur natif de Node et de vrais clients Colyseus. Playwright vérifie les interactions et les retours répétés au menu. Le serveur de test attribue des ressources uniquement dans sa fixture ; la production ne propose aucune commande de ce type.
+
+Le benchmark mesure 600 ticks après 60 ticks de chauffe sur la carte réelle, avec 32 joueurs et 1 024 soldats en mouvement. Il inclut les vues clients et leur encodage toutes les 100 ms. Ses résultats dépendent de la machine et ne constituent pas une limite de capacité en production.
+
+## Production
+
+```sh
+pnpm prod
 ```
 
-#### Serveur en mode développement
-```
-pnpm run server
-```
+Cette commande compile le jeu, copie la carte dans `apps/server/dist/default.map`, puis sert le client et Colyseus depuis `http://localhost:2567`. Les assets utilisent la compression HTTP et un cache durable pour les noms contenant un hash. Le moniteur Colyseus est réservé au développement.
 
-#### Serveur en mode production
-```
-pnpm run server:prod
-```
+En HTTPS, le client utilise WSS sur le même domaine. Le reverse proxy doit transmettre le matchmaking et les mises à niveau WebSocket. Déployer le client et le serveur ensemble : Colyseus 0.14 a été remplacé par Colyseus 0.17.
 
-#### Exécuter client et serveur en mode production simultanément
-```
-pnpm run prod
-```
+| Variable            | Usage                                                                        |
+| ------------------- | ---------------------------------------------------------------------------- |
+| `PORT`              | Port du serveur, 2567 par défaut                                             |
+| `HOST`              | Interface d’écoute, `0.0.0.0` par défaut                                     |
+| `MAP_PATH`          | Chemin d’une autre carte rectangulaire                                       |
+| `ALLOWED_ORIGINS`   | Origines HTTP autorisées, séparées par des virgules                          |
+| `VITE_SERVER_URL`   | Cible du proxy Vite en développement                                         |
+| `VITE_COLYSEUS_URL` | Adresse publique Colyseus si différente du domaine du jeu ; définie au build |
 
-### Déploiement en Production
+La room conserve le monde en mémoire tant que le processus reste actif. Quitter retire les unités et bâtiments du joueur. Les ressources épuisées ne réapparaissent pas par défaut. Le jeu ne dispose pas de stockage durable ni de comptes.
 
-Lorsque vous construisez pour la production avec `npm run build`, Vite utilisera automatiquement les variables d'environnement définies dans `.env.production`.
+## Modules et bibliothèques
 
-Commande pour construire le client en mode production :
-```
-cd pvpstrat-io/apps/client
-npm run build
-```
+| Emplacement                         | Responsabilité                                            |
+| ----------------------------------- | --------------------------------------------------------- |
+| `packages/shared/src/entities.ts`   | Schémas Colyseus communs                                  |
+| `apps/server/src/game`              | Monde, économie, unités, combat, navigation et visibilité |
+| `apps/server/src/rooms/GameRoom.ts` | Cycle de vie Colyseus et validation des messages          |
+| `apps/client/src/game/rendering`    | Carte, entités, collisions et effets Phaser               |
+| `apps/client/src/game/network`      | Connexion au SDK Colyseus                                 |
+| `apps/client/src/game/scenes`       | Coordination du jeu, du menu et de l’interface            |
+
+Colyseus gère les deltas, vues privées, callbacks et ping. EasyStar fournit A* et son budget de calcul. RBush indexe les entités serveur ; Phaser fournit son RTree côté client. Phaser gère aussi le culling de carte, les groupes réutilisables, les animations et le redimensionnement. Les règles de coûts, collision et combat restent du code métier.
+
+Le [rapport de refactorisation](docs/refactoring.md) détaille les corrections, validations et limites des mesures.
