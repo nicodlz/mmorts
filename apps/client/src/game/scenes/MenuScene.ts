@@ -54,7 +54,7 @@ export class MenuScene extends Phaser.Scene {
       .text(
         0,
         0,
-        "Récoltez, construisez et commandez votre armée.\nWASD / ZQSD · B : construire · Tab : combat · M : carte",
+        "Récoltez, construisez et commandez votre armée.\nUn tutoriel vous accompagne au début.\nWASD / ZQSD · B : construire · Tab : combat · M : carte",
         { fontSize: "13px", color: "#aaaaaa", align: "center" },
       )
       .setOrigin(0.5);

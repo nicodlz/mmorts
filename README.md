@@ -30,6 +30,14 @@ Les applications `apps/web` et `apps/docs` sont les exemples Next.js conservés 
 
 Le joueur commence sans ressources. Les maisons augmentent la capacité de population ; les casernes recrutent les soldats et les centres-villes recrutent les villageois. Les coûts et recettes sont centralisés dans `packages/shared/src`.
 
+## Tutoriel de départ
+
+À la première partie dans ce navigateur, un guide accompagne le joueur : déplacement, récolte pour une maison, construction, préparation et placement d'un centre-ville, recrutement d'un villageois, puis découverte de la carte. Les compteurs utilisent les coûts partagés avec le serveur ; les étapes de construction et de recrutement attendent les entités confirmées par Colyseus.
+
+Le guide indique une réserve proche encore disponible avec un cercle ou une flèche lorsqu'elle est hors écran. Il propose de continuer l'exploration si aucune réserve adaptée n'est visible. Il reste accessible pendant le jeu, se met en pause à la mort et vérifie la capacité de population avant le recrutement.
+
+« Passer le tutoriel » permet de jouer librement. Le bouton « Tuto » relance le guide à tout moment. La fin ou le passage est mémorisé localement dans le navigateur ; une partie quittée retire les bâtiments et unités, donc un guide inachevé recommence avec la nouvelle colonie.
+
 ## Vérification
 
 ```sh
@@ -42,7 +50,7 @@ pnpm benchmark
 pnpm audit --prod
 ```
 
-Les tests serveur utilisent le lanceur natif de Node et de vrais clients Colyseus. Playwright vérifie les interactions et les retours répétés au menu. Le serveur de test attribue des ressources uniquement dans sa fixture ; la production ne propose aucune commande de ce type.
+Les tests serveur utilisent le lanceur natif de Node et de vrais clients Colyseus. Playwright vérifie les interactions, les retours répétés au menu et le tutoriel complet avec les coûts réels, sans ressources de départ. D'autres scénarios reçoivent des ressources uniquement dans la fixture ; la production ne propose aucune commande de ce type.
 
 Le benchmark mesure 600 ticks après 60 ticks de chauffe sur la carte réelle, avec 32 joueurs et 1 024 soldats en mouvement. Il inclut les vues clients et leur encodage toutes les 100 ms. Ses résultats dépendent de la machine et ne constituent pas une limite de capacité en production.
 

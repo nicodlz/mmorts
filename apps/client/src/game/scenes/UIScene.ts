@@ -9,6 +9,7 @@ import {
 } from "shared";
 import { BUILDINGS, RESOURCE_LABELS } from "../rendering/presentation";
 import { Minimap } from "../ui/Minimap";
+import { Tutorial } from "../ui/Tutorial";
 import type { GameScene } from "./GameScene";
 
 const STYLE = {
@@ -33,6 +34,7 @@ export class UIScene extends Phaser.Scene {
   private menuVisible = false;
   private selectedIndex = 0;
   private minimap?: Minimap;
+  private tutorial?: Tutorial;
   private death?: Phaser.GameObjects.Text;
   private lastText = "";
   private onResize = () => this.layout();
@@ -85,6 +87,7 @@ export class UIScene extends Phaser.Scene {
     this.button("B · Construire", 12, 90, () => this.toggleBuildMenu());
     this.button("M · Carte", 140, 90, () => this.toggleMap());
     this.button("Menu", 240, 90, () => this.gameScene?.returnToMenu());
+    this.button("Tuto", 305, 90, () => this.tutorial?.restart());
     this.createBuildMenu();
     this.minimap = new Minimap(
       this,
@@ -105,6 +108,11 @@ export class UIScene extends Phaser.Scene {
         if (point) this.gameScene?.moveUnits(point);
       },
     );
+    this.tutorial = new Tutorial(this, data.gameScene, {
+      build: (type) => this.openBuildMenu(type),
+      map: () => this.toggleMap(),
+      isMapOpen: () => !!this.minimap?.full.visible,
+    });
     this.gameScene.events.on("notice", this.onNotice);
     this.scale.on("resize", this.onResize);
     this.input.on("wheel", this.onWheel);
@@ -135,6 +143,7 @@ export class UIScene extends Phaser.Scene {
         `Vous êtes mort\nRéapparition dans ${Math.max(0, Math.ceil((player.respawnTime - Date.now()) / 1000))} s`,
       );
     this.minimap?.update(delta);
+    this.tutorial?.update(delta);
     const building = game.connection.room?.state.buildings.get(
       game.selectedBuildingId ?? "",
     );
@@ -154,9 +163,20 @@ export class UIScene extends Phaser.Scene {
   }
   toggleMap(): void {
     this.minimap?.toggle();
+    this.tutorial?.mapVisibilityChanged(!!this.minimap?.full.visible);
+  }
+  private openBuildMenu(type: BuildingType): void {
+    this.menuVisible = true;
+    this.buildMenu?.setVisible(true);
+    this.selectedIndex = BUILDINGS.findIndex(
+      (building) => building.type === type,
+    );
+    this.gameScene?.selectBuild(type);
+    this.highlight();
   }
   cancel(): void {
     this.minimap?.close();
+    this.tutorial?.mapVisibilityChanged(false);
     this.menuVisible = false;
     this.buildMenu?.setVisible(false);
   }
@@ -299,6 +319,7 @@ export class UIScene extends Phaser.Scene {
     this.notice?.setPosition(this.scale.width / 2, 125);
     this.death?.setPosition(this.scale.width / 2, this.scale.height / 2);
     this.minimap?.resize();
+    this.tutorial?.resize();
   }
   private shutdown(): void {
     this.scale.off("resize", this.onResize);
@@ -306,6 +327,8 @@ export class UIScene extends Phaser.Scene {
     this.gameScene?.events.off("notice", this.onNotice);
     this.minimap?.destroy();
     this.minimap = undefined;
+    this.tutorial?.destroy();
+    this.tutorial = undefined;
     this.buildButtons.length = 0;
     this.gameScene = undefined;
     this.buildingPanel = undefined;

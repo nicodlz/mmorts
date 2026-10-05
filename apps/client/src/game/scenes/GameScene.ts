@@ -268,6 +268,9 @@ export class GameScene extends Phaser.Scene {
     this.selectedBuildingId = undefined;
     this.preview?.setTexture(type).setVisible(true);
   }
+  get buildType(): BuildingType | undefined {
+    return this.selectedType;
+  }
   cancelBuild(): void {
     this.selectedType = undefined;
     this.preview?.setVisible(false);

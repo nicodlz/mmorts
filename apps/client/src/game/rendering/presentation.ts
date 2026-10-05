@@ -1,5 +1,6 @@
 import Phaser from "phaser";
 import { BuildingType, ResourceType } from "shared";
+export { RESOURCE_LABELS } from "./labels";
 
 export const BUILDINGS = [
   { type: BuildingType.HOUSE, name: "Maison" },
@@ -20,14 +21,6 @@ export const RESOURCE_SPRITES: Record<ResourceType, string> = {
   [ResourceType.IRON]: "stone",
   [ResourceType.COAL]: "stone",
   [ResourceType.STEEL]: "stone",
-};
-export const RESOURCE_LABELS: Record<ResourceType, string> = {
-  gold: "Or",
-  wood: "Bois",
-  stone: "Pierre",
-  iron: "Fer",
-  coal: "Charbon",
-  steel: "Acier",
 };
 export const hueColor = (hue: number): number =>
   Phaser.Display.Color.HSVToRGB((((hue % 360) + 360) % 360) / 360, 0.85, 1)
